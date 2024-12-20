@@ -1,2 +1,2 @@
 # NBP
-Npredne Baze Podataka Projekti
+Napredne Baze Podataka Projekti
