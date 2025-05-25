@@ -1,1 +1,4 @@
-./back/node_modules/*
+# Ignore node_modules only in specific folders
+back/node_modules/
+client/node_modules/
+
