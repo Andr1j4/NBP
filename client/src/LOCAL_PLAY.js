@@ -35,7 +35,6 @@ export default function LOCAL_PLAY() {
 
                 setGamePosition(game.fen());
 
-
                 // exit if the game is over
                 if (game.isGameOver() || game.isDraw()) {
                     alert("Game over");

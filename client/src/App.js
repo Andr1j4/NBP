@@ -11,12 +11,12 @@ export default function App() {
       <h1>Redis Chess Example</h1>
       You can try it locally using two web browsers.
       <br />
-      <a href="http://localhost:3000/?game_id=abc123&color=w">
-        player1: http://localhost:3000/?game_id=abc123&color=w
+      <a href="http://127.0.0.1:3000/?game_id=abc123&color=w">
+        player1: http://127.0.0.1:3000/?game_id=abc123&color=w
       </a>
       <br />
-      <a href="http://localhost:3000/?game_id=abc123&color=b">
-        player2: http://localhost:3000/?game_id=abc123&color=b
+      <a href="http://127.0.0.1:3000/?game_id=abc123&color=b">
+        player2: http://127.0.0.1:3000/?game_id=abc123&color=b
       </a>
       <br />
       NOTICE: The game_id must be the same for both players.
