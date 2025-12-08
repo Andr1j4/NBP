@@ -11,6 +11,7 @@
   "author": "Djordje Stojiljkovic",
   "license": "ISC",
   "dependencies": {
+    "chess.js": "^1.4.0",
     "express": "^5.1.0",
     "redis": "^5.1.0",
     "ws": "^8.18.2"
