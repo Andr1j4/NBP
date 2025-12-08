@@ -1,10 +1,22 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { createClient } = require('redis');
-// note: no chess.js on backend — compute undo by reading previous persisted FENs from the stream
+const cassandra = require('./db/cassandra');
+
+// / note: no chess.js on backend — compute undo by reading previous persisted FENs from the stream
 
 const app = express();
 const PORT = 8080;
+
+const playerRoutes = require('./routes/playerRoutes');
+const tournamentRoutes = require('./routes/tournamentRoutes');
+
+
+app.use(express.json());
+
+// mount REST routes
+app.use('/api/players', playerRoutes);
+app.use('/api/tournaments', tournamentRoutes);
 
 // Redis setup
 const redis = createClient({ url: 'redis://192.168.122.230:6379' });
@@ -28,6 +40,7 @@ wss.on('connection', async (ws, req) => {
         try {
             const data = JSON.parse(msg);
             console.log(`[INFO] Received message: ${JSON.stringify(data)} from gameId=${gameId}`);
+
 
             if (data.type === 'move') {
                 const fen = data.fen || '';
@@ -56,6 +69,7 @@ wss.on('connection', async (ws, req) => {
                     }
                 });
             }
+
 
             if (data.type === 'undo') {
                 // prefer client-provided fen (client updated its state), otherwise use snapshot
@@ -271,9 +285,76 @@ wss.on('connection', async (ws, req) => {
                     });
                 }
             }
+
+            if (data.type === 'game_over') {
+                const result = data.result || null;
+                const reason = data.reason || null;
+                const endFen = data.fen || null;
+                const endTime = new Date();
+                const gameIdFromWs = ws.gameId; // from URL
+
+                console.log(
+                    `[INFO] game_over received for game ${gameIdFromWs}: result=${result}, reason=${reason}`
+                );
+
+                try {
+                    // 1) Look up tournament/round/board from matches_by_game
+                    const matchRes = await cassandra.execute(
+                        'SELECT tournament_id, round, board_number FROM matches_by_game WHERE game_id = ?',
+                        [gameIdFromWs],
+                        { prepare: true }
+                    );
+
+                    if (!matchRes.rowLength) {
+                        console.warn(
+                            `[WARN] game_over: no match found in matches_by_game for game_id=${gameIdFromWs}`
+                        );
+                        return;
+                    }
+
+                    const row = matchRes.rows[0];
+                    const tournamentId = row.tournament_id;
+                    const round = row.round;
+                    const boardNumber = row.board_number;
+
+                    // 2) Update matches row with result + end_time (+ final_fen if you added it)
+                    await cassandra.execute(
+                        `
+            UPDATE matches
+            SET result = ?, end_time = ?, final_fen = ?
+            WHERE tournament_id = ? AND round = ? AND board_number = ?
+            `,
+                        [result, endTime, endFen, tournamentId, round, boardNumber],
+                        { prepare: true }
+                    );
+
+                    // 3) Optionally mirror the result into matches_by_game too
+                    await cassandra.execute(
+                        `
+            UPDATE matches_by_game
+            SET result = ?, end_time = ?
+            WHERE game_id = ?
+            `,
+                        [result, endTime, gameIdFromWs],
+                        { prepare: true }
+                    );
+
+                    console.log(
+                        `[INFO] Stored game result for tournament=${tournamentId} round=${round} board=${boardNumber} result=${result}`
+                    );
+                } catch (e) {
+                    console.error('[ERROR] game_over DB update failed:', e);
+                }
+
+                return; // we've handled this message
+            }
+
+
         } catch (err) {
             console.error(`[ERROR] ${err.message}`);
         }
+
+
     });
 
     // on disconnect, we might want to clean up or notify other players

@@ -39,7 +39,7 @@ export default function LOCAL_PLAY() {
             return;
         }
 
-        const socket = new WebSocket(`ws://192.168.0.8:8080/${gameId}/${colorFromURL}`);
+        const socket = new WebSocket(`ws://192.168.0.2:8080/${gameId}/${colorFromURL}`);
 
         socket.onopen = () => {
             // read persisted lastId only from localStorage to avoid recreating socket on updates
@@ -163,17 +163,42 @@ export default function LOCAL_PLAY() {
             if (data.type === "move") {
                 // apply move on a fresh instance derived from current authoritative state
                 const g = new Chess(gameRef.current.fen());
-                const mv = g.move(data.move);
-                if (mv === null) {
+                const move = g.move(data.move);
+                if (move === null) {
                     console.warn("Incoming move invalid for current position", data.move);
                     return;
                 }
                 updateGameInstance(g);
 
                 // use the fresh instance (g) not the stale `game` state
+
                 if (g.isGameOver() || g.isDraw()) {
-                    alert("Game over");
+                    let result = null;
+                    let reason = null;
+
+                    if (g.isCheckmate()) {
+                        result = (move.color === 'w') ? '1-0' : '0-1';
+                        reason = 'checkmate';
+                    } else if (g.isDraw()) {
+                        result = '1/2-1/2';
+                        reason = 'draw';
+                    }
+
+                    if (socket.readyState === WebSocket.OPEN && result) {
+                        socket.send(JSON.stringify({
+                            type: 'game_over',
+                            gameId,
+                            result,
+                            reason,
+                            fen: g.fen()
+                        }));
+                    }
+
+                    setTimeout(() => {
+                        alert("Game over");
+                    }, 500);
                 }
+
                 return;
             }
 
@@ -247,7 +272,9 @@ export default function LOCAL_PLAY() {
             }
 
             if (g.isGameOver() || g.isDraw()) {
-                alert("Game over");
+                setTimeout(() => {
+                    alert("Game over");
+                }, 500);
             }
 
             return true;

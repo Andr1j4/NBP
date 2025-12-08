@@ -36,9 +36,35 @@ export default function LOCAL_PLAY() {
                 setGamePosition(game.fen());
 
                 // exit if the game is over
-                if (game.isGameOver() || game.isDraw()) {
+                // if (game.isGameOver() || game.isDraw()) {
+                //     alert("Game over");
+                // };
+                if (g.isGameOver() || g.isDraw()) {
+                    let result = null;
+                    let reason = null;
+
+                    if (g.isCheckmate()) {
+                        result = (playerColor === 'w') ? '1-0' : '0-1';
+                        reason = 'checkmate';
+                    } else if (g.isDraw()) {
+                        result = '1/2-1/2';
+                        reason = 'draw'; // later you can refine: stalemate, repetition, etc.
+                    }
+
+                    if (ws && ws.readyState === WebSocket.OPEN && result) {
+                        ws.send(JSON.stringify({
+                            type: 'game_over',
+                            gameId,      // from query
+                            result,      // "1-0", "0-1", "1/2-1/2"
+                            reason,      // 'checkmate' | 'draw' | etc.
+                            fen: g.fen() // final FEN (optional but nice to store)
+                        }));
+                    }
+
                     alert("Game over");
-                };
+                }
+
+
                 return true;
             } else if (data.type === "reset") {
                 game.reset();
