@@ -8,6 +8,16 @@ const cassandra = require('./db/cassandra');
 const app = express();
 const PORT = 8080;
 
+const cors = require('cors');
+
+app.use(cors({
+    origin: [
+        'http://localhost:3000',
+        'http://127.0.0.1:3000',
+        'http://192.168.0.2:3000'
+    ]
+}));
+
 const playerRoutes = require('./routes/playerRoutes');
 const tournamentRoutes = require('./routes/tournamentRoutes');
 
@@ -40,6 +50,26 @@ wss.on('connection', async (ws, req) => {
         try {
             const data = JSON.parse(msg);
             console.log(`[INFO] Received message: ${JSON.stringify(data)} from gameId=${gameId}`);
+
+            const meta = await redis.hGetAll(`${streamKey}:meta`);
+            const isFinished = meta && meta.finished === '1';
+            const isResync = data.type === 'resync';
+            const isGameOverMessage = data.type === 'game_over';
+
+            // Block *most* messages if the game is finished, but still allow resync so reconnects can see final board/result
+            if (isFinished && !isResync && !isGameOverMessage) {
+                console.log(`[INFO] Ignoring ${data.type} for finished game ${gameId}`);
+                ws.send(JSON.stringify({
+                    type: 'game_finished',
+                    gameId,
+                    reason: 'already_finished',
+                    result: meta.result || '',
+                    finalFen: meta.finalFen || null
+                }));
+                return;
+            }
+
+
 
 
             if (data.type === 'move') {
@@ -106,7 +136,7 @@ wss.on('connection', async (ws, req) => {
                 // notify other clients (opponent) about the undo request
                 wss.clients.forEach((client) => {
                     if (client !== ws && client.readyState === 1 && client.gameId === gameId) {
-                        +                        console.log(`[DEBUG] notifying client remote=${client._socket?.remoteAddress || 'unknown'} about undo_request id=${id}`);
+                        console.log(`[DEBUG] notifying client remote=${client._socket?.remoteAddress || 'unknown'} about undo_request id=${id}`);
                         client.send(JSON.stringify({
                             type: 'undo_request',
                             streamId: id,
@@ -124,8 +154,8 @@ wss.on('connection', async (ws, req) => {
 
             // Opponent accepted the undo request -> create a real 'undo' event and notify all clients
             if (data.type === 'undo_accept') {
-                -                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
-                +                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
+                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
+                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
 
                 let fenCandidate = '';
                 if (data.fen && data.fen.length) {
@@ -133,7 +163,7 @@ wss.on('connection', async (ws, req) => {
                 } else {
                     fenCandidate = await getFenFromRecentList(streamKey, 1);
                 }
-                +                console.log(`[DEBUG] undo_accept chosen fenCandidate=${fenCandidate || '<empty>'} for requestId=${data.requestId}`);
+                console.log(`[DEBUG] undo_accept chosen fenCandidate=${fenCandidate || '<empty>'} for requestId=${data.requestId}`);
 
                 // persist + xAdd + broadcast (your existing code)
                 // store requestId so resync can correlate the response to the original undo_request
@@ -144,7 +174,7 @@ wss.on('connection', async (ws, req) => {
                     fen: fenCandidate,
                     state: 'accepted'
                 });
-                +                console.log(`[INFO] Persisted undo (response) id=${id} requestId=${data.requestId} acceptedBy=${ws.color}`);
+                console.log(`[INFO] Persisted undo (response) id=${id} requestId=${data.requestId} acceptedBy=${ws.color}`);
                 if (fenCandidate) {
                     await redis.set(`${streamKey}:fen`, fenCandidate);
                     await redis.rPush(`${streamKey}:fens`, fenCandidate);
@@ -154,7 +184,7 @@ wss.on('connection', async (ws, req) => {
 
                 wss.clients.forEach((client) => {
                     if (client.readyState === 1 && client.gameId === gameId) {
-                        +                        console.log(`[DEBUG] broadcasting undo accepted -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id} requestId=${data.requestId}`);
+                        console.log(`[DEBUG] broadcasting undo accepted -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id} requestId=${data.requestId}`);
                         client.send(JSON.stringify({
                             type: 'undo',
                             streamId: id,
@@ -176,12 +206,12 @@ wss.on('connection', async (ws, req) => {
                     rejectedBy: ws.color || data.by || 'unknown',
                     state: 'rejected'
                 });
-                +                console.log(`[INFO] Persisted undo_reject id=${id} requestId=${data.requestId} rejectedBy=${ws.color}`);
+                console.log(`[INFO] Persisted undo_reject id=${id} requestId=${data.requestId} rejectedBy=${ws.color}`);
                 console.log(`[INFO] Undo rejected on ${streamKey} with ID ${id} rejectedBy=${ws.color}`);
 
                 // notify the requester (and others) about rejection
                 wss.clients.forEach((client) => {
-                    +                    console.log(`[DEBUG] broadcasting undo_reject -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id}`);
+                    console.log(`[DEBUG] broadcasting undo_reject -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id}`);
                     if (client.readyState === 1 && client.gameId === gameId) {
                         client.send(JSON.stringify({
                             type: 'undo_reject',
@@ -217,74 +247,36 @@ wss.on('connection', async (ws, req) => {
 
             if (data.type === 'resync') {
                 console.log(`[INFO] Resync requested for gameId=${gameId}, lastId=${data.lastId}`);
-                const lastSeenId = data.lastId || '0-0';
 
-                // fast snapshot path for fresh clients ONLY
-                // if (!lastSeenId || lastSeenId === '0-0') {
+                const streamKey = `game:${gameId}`;
+
+                // 1) Always send latest snapshot
                 const snapshotFen = await redis.get(`${streamKey}:fen`);
                 if (snapshotFen) {
                     ws.send(JSON.stringify({ type: 'snapshot', fen: snapshotFen }));
                 }
-                // }
 
-                const entries = await redis.xRead(
-                    [{ key: streamKey, id: lastSeenId }],
-                    { COUNT: 20 }
-                );
+                // 2) Check if game is finished -> send result too
+                const meta = await redis.hGetAll(`${streamKey}:meta`);
+                const finished = meta && meta.finished === '1';
 
-                if (!entries || !entries.length || !entries[0] || !entries[0].messages) {
-                    console.log(`[WARN] No stream entries returned for ${streamKey} since ${lastSeenId}`);
-                } else {
-                    +                    console.log(`[DEBUG] resync: returned ${entries[0].messages.length} messages for ${streamKey} since ${lastSeenId}`);
-                    // build a set of resolved undo_request ids by scanning for undo / undo_reject responses
-                    const messages = entries[0].messages;
-                    const resolvedRequestIds = new Set();
-                    for (const { name, message } of messages) {
-                        const obj = Object.fromEntries(Object.entries(message).map(([k, v]) => [k, v && v.toString ? v.toString() : v]));
-                        if ((obj.type === 'undo' || obj.type === 'undo_reject') && obj.requestId) {
-                            +                            console.log(`[DEBUG] resync found resolver type=${obj.type} requestId=${obj.requestId}`);
-                            resolvedRequestIds.add(obj.requestId);
-                        }
-                    }
-                    +                    console.log(`[DEBUG] resync resolvedRequestIds=`, Array.from(resolvedRequestIds));
-
-                    entries[0].messages.forEach(({ name, message }) => {
-                        // normalize message values to strings
-                        const obj = Object.fromEntries(
-                            Object.entries(message).map(([k, v]) => [k, v && v.toString ? v.toString() : v])
-                        );
-                        const type = obj.type;
-
-                        // ✅ NEW: skip undo_request that already has a corresponding undo/undo_reject
-                        if (type === 'undo_request' && resolvedRequestIds.has(name)) {
-                            console.log(`[DEBUG] resync skipping resolved undo_request id=${name}`);
-                            return;
-                        }
-
-                        if (type === 'move') {
-                            ws.send(JSON.stringify({
-                                streamId: name,
-                                type: 'move',
-                                move: JSON.parse(obj.move),
-                                fen: obj.fen || undefined
-                            }));
-                        } else if (type === 'undo' || type === 'reset') {
-                            ws.send(JSON.stringify({
-                                streamId: name,
-                                type,
-                                fen: obj.fen || undefined,
-                                acceptedBy: obj.acceptedBy || undefined,
-                                rejectedBy: obj.rejectedBy || undefined
-                            }));
-                        } else {
-                            // generic events (undo_request, undo_reject, ...)
-                            const out = { streamId: name, type };
-                            for (const k in obj) if (k !== 'type' && k !== 'move') out[k] = obj[k];
-                            ws.send(JSON.stringify(out));
-                        }
-                    });
+                if (finished) {
+                    ws.send(JSON.stringify({
+                        type: 'game_result',
+                        gameId,
+                        result: meta.result || '',
+                        reason: meta.reason || 'finished',
+                        finalFen: meta.finalFen || snapshotFen || null
+                    }));
                 }
+
+                // 3) Do NOT xRead anything here – snapshot is the single source of truth
+                console.log('[DEBUG] Resync: snapshot only, no history replay');
+                return;
             }
+
+
+
 
             if (data.type === 'game_over') {
                 const result = data.result || null;
@@ -300,10 +292,20 @@ wss.on('connection', async (ws, req) => {
                 try {
                     // 1) Look up tournament/round/board from matches_by_game
                     const matchRes = await cassandra.execute(
-                        'SELECT tournament_id, round, board_number FROM matches_by_game WHERE game_id = ?',
+                        `
+                        SELECT tournament_id, round, board_number, white_player, black_player
+                        FROM matches_by_game
+                        WHERE game_id = ?
+                        `,
                         [gameIdFromWs],
                         { prepare: true }
                     );
+
+
+
+                    // prepare update statements
+
+
 
                     if (!matchRes.rowLength) {
                         console.warn(
@@ -313,9 +315,78 @@ wss.on('connection', async (ws, req) => {
                     }
 
                     const row = matchRes.rows[0];
+
+
+                    console.log(`[DEBUG] game_over: found match row=${JSON.stringify(row)} for game_id=${gameIdFromWs}`);
                     const tournamentId = row.tournament_id;
                     const round = row.round;
                     const boardNumber = row.board_number;
+                    const whiteId = row.white_player;
+                    const blackId = row.black_player;
+
+                    // scoring: win = 1, draw = 0.5, loss = 0
+                    let whiteDelta = 0;
+                    let blackDelta = 0;
+
+                    if (result === '1-0') {
+                        whiteDelta = 1.0;
+                        blackDelta = 0.0;
+                    } else if (result === '0-1') {
+                        whiteDelta = 0.0;
+                        blackDelta = 1.0;
+                    } else if (result === '1/2-1/2') {
+                        whiteDelta = 0.5;
+                        blackDelta = 0.5;
+                    } else {
+                        console.warn(`[WARN] game_over: unknown result="${result}" – skipping leaderboard update`);
+                    }
+
+
+                    if (whiteDelta > 0 || blackDelta > 0) {
+                        // White
+                        const whiteLB = await cassandra.execute(
+                            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
+                            [tournamentId, whiteId],
+                            { prepare: true }
+                        );
+                        const whiteCurrent = whiteLB.rowLength ? whiteLB.rows[0].points : 0.0;
+                        const whiteNew = whiteCurrent + whiteDelta;
+
+                        await cassandra.execute(
+                            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
+                            [tournamentId, whiteId, whiteNew],
+                            { prepare: true }
+                        );
+
+                        // Black
+                        const blackLB = await cassandra.execute(
+                            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
+                            [tournamentId, blackId],
+                            { prepare: true }
+                        );
+                        const blackCurrent = blackLB.rowLength ? blackLB.rows[0].points : 0.0;
+                        const blackNew = blackCurrent + blackDelta;
+
+                        await cassandra.execute(
+                            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
+                            [tournamentId, blackId, blackNew],
+                            { prepare: true }
+                        );
+
+                        // mark game as finished in Redis and store result info
+                        await redis.hSet(`${streamKey}:meta`, {
+                            finished: '1',
+                            result: result || '',
+                            reason: reason || '',
+                            finalFen: endFen || ''
+                        });
+
+
+                        console.log(
+                            `[INFO] Updated leaderboard_by_player: white=${whiteId} -> ${whiteNew}, black=${blackId} -> ${blackNew}`
+                        );
+                    }
+
 
                     // 2) Update matches row with result + end_time (+ final_fen if you added it)
                     await cassandra.execute(
@@ -342,14 +413,26 @@ wss.on('connection', async (ws, req) => {
                     console.log(
                         `[INFO] Stored game result for tournament=${tournamentId} round=${round} board=${boardNumber} result=${result}`
                     );
+
+
+                    // 🔔 broadcast official result to both clients
+                    wss.clients.forEach((client) => {
+                        if (client.readyState === 1 && client.gameId === gameIdFromWs) {
+                            client.send(JSON.stringify({
+                                type: 'game_result',
+                                gameId: gameIdFromWs,
+                                result,        // "1-0" | "0-1" | "1/2-1/2"
+                                reason,        // "checkmate" | "draw"
+                                finalFen: endFen || null
+                            }));
+                        }
+                    });
                 } catch (e) {
                     console.error('[ERROR] game_over DB update failed:', e);
                 }
 
                 return; // we've handled this message
             }
-
-
         } catch (err) {
             console.error(`[ERROR] ${err.message}`);
         }

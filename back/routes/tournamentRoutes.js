@@ -6,6 +6,7 @@ const {
     registerPlayer,
     listTournamentPlayers,
     startRound,
+    getStandings,
 } = require('../controllers/tournamentController');
 
 // POST /api/tournaments
@@ -19,5 +20,8 @@ router.get('/:id/players', listTournamentPlayers);
 
 // Start a round 
 router.post('/:id/start', startRound);
+
+router.get('/:id/standings', getStandings);
+
 
 module.exports = router;

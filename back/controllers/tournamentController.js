@@ -1,5 +1,7 @@
 const cassandra = require('../db/cassandra');
 const { randomUUID } = require('crypto');
+const { types } = require('cassandra-driver');
+
 
 // POST /api/tournaments
 async function createTournament(req, res) {
@@ -274,10 +276,54 @@ async function startRound(req, res) {
 }
 
 
+async function getStandings(req, res) {
+    // sort in memory by points DESC
+    console.log('[HTTP] GET /api/tournaments/:id/standings', req.params.id);
+
+    try {
+        const { id } = req.params;
+
+        // 1) parse tournament id as UUID
+        const tournamentId = types.Uuid.fromString(id);
+
+        // 2) query leaderboard_by_player
+        const result = await cassandra.execute(
+            'SELECT player_id, points FROM leaderboard_by_player WHERE tournament_id = ?',
+            [tournamentId],
+            { prepare: true }
+        );
+
+        // 3) sort by points desc
+        const rows = result.rows.slice().sort((a, b) => {
+            const pa = a.points || 0;
+            const pb = b.points || 0;
+            return pb - pa;
+        });
+
+        // 4) add rank numbers
+        const standings = rows.map((row, idx) => ({
+            rank: idx + 1,
+            playerId: row.player_id.toString(),
+            points: row.points || 0
+        }));
+
+        return res.json({
+            tournamentId: id,
+            standings
+        });
+    } catch (err) {
+        console.error('[ERROR] getTournamentStandings failed:', err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+
+
 
 module.exports = {
     createTournament,
     registerPlayer,
     listTournamentPlayers,
     startRound,
+    getStandings,
 };

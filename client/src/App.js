@@ -1,6 +1,6 @@
 import React, { useState } from "react";
-// import LOCAL_PLAY from "./LOCAL_PLAY";
 import REDIS_CHESS from "./REDIS_CHESS";
+import TournamentStandings from "./TournamentStandings";
 
 export default function App() {
   const [showBoard, setShowBoard] = useState(false);
@@ -24,14 +24,11 @@ export default function App() {
       NOTICE: The color must be different for both players.
       <br />
       NOTICE: Change Redis server in server_redis if needed.
-      {/* Uncomment the line below to use LOCAL_PLAY component */}
-      {/* Local play goes with server_local from backend}
-      {/* <LOCAL_PLAY id="LocalPlayBoard" /> */}
+      <br />
+      <REDIS_CHESS id="PlayableBoard" />
 
-      {/* Uncomment the line below to use REDIS_CHESS component */}
-      {/* {/* REDIS_CHESS goes with server_redis from backend} */}
-      {<REDIS_CHESS id="PlayableBoard" />}
-
+      {/* NEW: standings */}
+      <TournamentStandings />
     </div>
   );
 }

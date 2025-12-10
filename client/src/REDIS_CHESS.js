@@ -29,6 +29,9 @@ export default function LOCAL_PLAY() {
     const optimisticResetFenRef = useRef(null);
     const pendingUndoRequestsRef = useRef(new Set());
 
+    const [finished, setFinished] = useState(false);
+
+
     const query = new URLSearchParams(window.location.search);
     const gameId = query.get("game_id");
     const colorFromURL = query.get("color");
@@ -161,6 +164,8 @@ export default function LOCAL_PLAY() {
             console.log("Received message:", msg.data);
 
             if (data.type === "move") {
+
+
                 // apply move on a fresh instance derived from current authoritative state
                 const g = new Chess(gameRef.current.fen());
                 const move = g.move(data.move);
@@ -193,12 +198,35 @@ export default function LOCAL_PLAY() {
                             fen: g.fen()
                         }));
                     }
-
-                    setTimeout(() => {
-                        alert("Game over");
-                    }, 500);
                 }
 
+                return;
+            }
+
+            // Handle game_result and game_over messages (final results)
+            if (data.type === 'game_result') {
+                const myColor = colorFromURL;  // "w" or "b"
+                let message = 'Game over';
+
+                if (data.result === '1-0') {
+                    message = (myColor === 'w') ? 'You won! (1-0)' : 'You lost. (0-1)';
+                } else if (data.result === '0-1') {
+                    message = (myColor === 'b') ? 'You won! (0-1)' : 'You lost. (1-0)';
+                } else if (data.result === '1/2-1/2') {
+                    message = 'Draw. (½–½)';
+                }
+
+                setFinished(true);   // 👈 mark game as finished
+
+                // let React paint if needed, then show
+                setTimeout(() => {
+                    alert(message);
+                }, 200);
+
+
+
+                // optional: you can set some local state like `setGameFinished(true);`
+                // and use that to disable onDrop.
                 return;
             }
 
@@ -248,6 +276,16 @@ export default function LOCAL_PLAY() {
 
     function onDrop(sourceSquare, targetSquare, piece) {
         try {
+            if (finished) {
+                console.log('[DEBUG] move ignored: game is finished');
+                return false;
+            }
+
+            if ((playerColor === "w" && piece[0] !== "w") ||
+                (playerColor === "b" && piece[0] !== "b")) {
+                return false;
+            }
+
             if ((playerColor === "w" && piece[0] !== "w") ||
                 (playerColor === "b" && piece[0] !== "b")) {
                 return false;
@@ -271,12 +309,6 @@ export default function LOCAL_PLAY() {
                 }));
             }
 
-            if (g.isGameOver() || g.isDraw()) {
-                setTimeout(() => {
-                    alert("Game over");
-                }, 500);
-            }
-
             return true;
 
         } catch (error) {
@@ -288,6 +320,11 @@ export default function LOCAL_PLAY() {
     }
 
     function undoMove() {
+        if (finished) {
+            console.log('[DEBUG] undo ignored: game is finished');
+            return;
+        }
+
         console.log('[DEBUG] user clicked undo, sending undo_request');
         if (ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'undo_request' }));
@@ -299,9 +336,12 @@ export default function LOCAL_PLAY() {
     }
 
     function resetGame() {
-        // send reset request and wait for server to broadcast authoritative reset (with fen)
+        if (finished) {
+            console.log('[DEBUG] reset ignored: game is finished');
+            return;
+        }
+
         if (ws && ws.readyState === WebSocket.OPEN) {
-            // apply optimistic reset locally so initiator sees immediate effect
             const g = new Chess();
             updateGameInstance(g);
             optimisticResetRef.current = true;
@@ -312,6 +352,7 @@ export default function LOCAL_PLAY() {
             updateGameInstance(g);
         }
     }
+
 
     // debug: watch gamePosition updates
     useEffect(() => {
