@@ -1,5 +1,5 @@
 // client/src/TournamentAdmin.js
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 export default function TournamentAdmin() {
     const [tournamentId, setTournamentId] = useState("");
@@ -7,11 +7,23 @@ export default function TournamentAdmin() {
     const [pairings, setPairings] = useState(null);
     const [byes, setByes] = useState([]);
     const [standings, setStandings] = useState([]);
-    const [roundToComplete, setRoundToComplete] = useState("");
     const [status, setStatus] = useState("");
 
     const [matches, setMatches] = useState([]);
     const [matchesRoundInput, setMatchesRoundInput] = useState(""); // which round to inspect
+
+    const [tournaments, setTournaments] = useState([]);
+    const [rounds, setRounds] = useState([]);
+    const [selectedRound, setSelectedRound] = useState("");
+
+    // Find the currently selected round metadata
+    const selectedRoundObj = rounds.find(
+        (r) => String(r.round) === String(selectedRound)
+    );
+
+    const isSelectedRoundFinished = !!selectedRoundObj?.finishedAt;
+
+
 
 
     async function startRound() {
@@ -33,7 +45,6 @@ export default function TournamentAdmin() {
                 setStatus(`Error: ${data.error || "failed to start round"}`);
                 return;
             }
-
             setLastRound(data.round);
             setPairings(data.pairings || []);
             setByes(data.byes || []);
@@ -45,16 +56,24 @@ export default function TournamentAdmin() {
     }
 
     async function completeRound() {
-        if (!roundToComplete) {
-            setStatus("Please enter round number to complete.");
+        const round = parseInt(selectedRound, 10);
+
+        if (!round) {
+            setStatus("Please select a round to complete.");
             return;
         }
 
-        setStatus("Completing round...");
+
+        if (isSelectedRoundFinished) {
+            setStatus(`Round ${round} is already marked as finished.`);
+            return;
+        }
+
+        setStatus(`Completing round ${round}...`);
 
         try {
             const res = await fetch(
-                `http://192.168.0.2:8080/api/tournaments/${tournamentId}/rounds/${roundToComplete}/complete`,
+                `http://192.168.0.2:8080/api/tournaments/${tournamentId}/rounds/${round}/complete`,
                 { method: "POST" }
             );
 
@@ -66,10 +85,16 @@ export default function TournamentAdmin() {
             }
 
             if (data.roundCompleted) {
-                setStatus(`Round ${roundToComplete} marked as finished.`);
+                setStatus(`Round ${round} marked as finished.`);
             } else {
-                setStatus(`Round ${roundToComplete} not completed: ${data.reason || "unknown"}`);
+                setStatus(
+                    `Round ${round} not completed: ${data.reason || "unknown"}`
+                );
             }
+
+            // optional: reload rounds list so dropdown shows updated "(finished)"
+            // await loadRoundsForTournament();
+
         } catch (err) {
             console.error(err);
             setStatus("Error: could not complete round (check console).");
@@ -125,6 +150,7 @@ export default function TournamentAdmin() {
         }
     }
 
+
     async function resolveDraw(boardNumber, winner) {
         const round = parseInt(matchesRoundInput || lastRound, 10);
 
@@ -164,6 +190,56 @@ export default function TournamentAdmin() {
     }
 
 
+    useEffect(() => {
+        async function loadTournaments() {
+            try {
+                const res = await fetch("http://192.168.0.2:8080/api/tournaments");
+                const data = await res.json();
+                setTournaments(data.tournaments || []);
+            } catch (e) {
+                console.error("Failed to load tournaments", e);
+            }
+        }
+        loadTournaments();
+    }, []);
+
+    // 👇 NEW: load rounds when tournamentId changes
+    useEffect(() => {
+        async function loadRounds() {
+            if (!tournamentId) {
+                setRounds([]);
+                setSelectedRound("");
+                return;
+            }
+
+            try {
+                const res = await fetch(
+                    `http://192.168.0.2:8080/api/tournaments/${tournamentId}/rounds`
+                );
+                const data = await res.json();
+                const list = data.rounds || [];
+
+                setRounds(list);
+
+                if (list.length > 0) {
+                    const latest = list[list.length - 1].round;
+                    setSelectedRound(String(latest));
+                    setMatchesRoundInput(String(latest)); // keep your old input in sync if you want
+                } else {
+                    setSelectedRound("");
+                    setMatchesRoundInput("");
+                }
+            } catch (err) {
+                console.error("Failed to load rounds", err);
+            }
+        }
+
+        loadRounds();
+    }, [tournamentId]);
+
+
+
+
 
     return (
         <div style={{ padding: "1rem", fontFamily: "sans-serif" }}>
@@ -193,20 +269,60 @@ export default function TournamentAdmin() {
 
             <div style={{ marginBottom: "1rem" }}>
                 <label>
-                    Round to complete:&nbsp;
-                    <input
-                        type="number"
-                        min="1"
-                        style={{ width: "60px" }}
-                        value={roundToComplete}
-                        onChange={(e) => setRoundToComplete(e.target.value)}
-                    />
+                    Round:&nbsp;
+                    <select
+                        value={selectedRound}
+                        onChange={(e) => {
+                            const value = e.target.value;
+                            setSelectedRound(value);
+                            setMatchesRoundInput(value); // keep matches section in sync
+                        }}
+                        disabled={rounds.length === 0}
+                    >
+                        <option value="">-- select round --</option>
+                        {rounds.map((r) => (
+                            <option key={r.round} value={r.round}>
+                                Round {r.round}{" "}
+                                {r.finishedAt ? "(finished)" : "(ongoing)"}
+                            </option>
+                        ))}
+                    </select>
                 </label>
                 &nbsp;
-                <button onClick={completeRound} disabled={!tournamentId}>
+                <button
+                    onClick={completeRound}
+                    disabled={
+                        !tournamentId ||
+                        !selectedRound ||
+                        isSelectedRoundFinished // 🔒 disable if already finished
+                    }
+                >
                     ✅ Complete round
                 </button>
+                {selectedRound && (
+                    <span style={{ marginLeft: "0.5rem", fontStyle: "italic" }}>
+                        {isSelectedRoundFinished ? "Already finished ✅" : "Not finished yet ⏳"}
+                    </span>
+                )}
             </div>
+
+            <div style={{ marginBottom: "1rem" }}>
+                <label>
+                    Tournament:&nbsp;
+                    <select
+                        value={tournamentId}
+                        onChange={(e) => setTournamentId(e.target.value)}
+                    >
+                        <option value="">-- select tournament --</option>
+                        {tournaments.map(t => (
+                            <option key={t.id} value={t.id}>
+                                {t.name} ({t.status}) – {t.id}
+                            </option>
+                        ))}
+                    </select>
+                </label>
+            </div>
+
 
             {status && (
                 <div style={{ margin: "0.5rem 0", fontStyle: "italic" }}>
@@ -310,16 +426,27 @@ export default function TournamentAdmin() {
                 <div style={{ marginBottom: "0.5rem" }}>
                     <label>
                         Round:&nbsp;
-                        <input
-                            type="number"
-                            value={matchesRoundInput}
-                            onChange={(e) => setMatchesRoundInput(e.target.value)}
-                            placeholder={lastRound ? `default: ${lastRound}` : ""}
-                            style={{ width: "60px" }}
-                        />
+                        <select
+                            value={selectedRound}
+                            onChange={(e) => {
+                                setSelectedRound(e.target.value);
+                                setMatchesRoundInput(e.target.value); // optional, to keep old state in sync
+                            }}
+                        >
+                            <option value="">-- select round --</option>
+                            {rounds.map(r => (
+                                <option key={r.round} value={r.round}>
+                                    Round {r.round}{" "}
+                                    {r.finishedAt ? "(finished)" : "(ongoing)"}
+                                </option>
+                            ))}
+                        </select>
                     </label>
                     &nbsp;
-                    <button onClick={loadMatchesForRound} disabled={!tournamentId}>
+                    <button
+                        onClick={loadMatchesForRound}
+                        disabled={!tournamentId || !selectedRound}
+                    >
                         🔎 Load matches
                     </button>
                 </div>

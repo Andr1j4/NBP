@@ -436,68 +436,80 @@ async function startRound(req, res) {
     }
 }
 
-module.exports = {
-    // ...other exports
-    startRound
-};
 
 
 async function getStandings(req, res) {
-    // sort in memory by points DESC
-    console.log('[HTTP] GET /api/tournaments/:id/standings', req.params.id);
+    const { id: tournamentId } = req.params;
 
     try {
-        const { id } = req.params;
-
-        // 1) parse tournament id as UUID
-        const tournamentId = types.Uuid.fromString(id);
-
-        // 2) query leaderboard_by_player
-        const result = await cassandra.execute(
+        const lbRes = await cassandra.execute(
             'SELECT player_id, points FROM leaderboard_by_player WHERE tournament_id = ?',
             [tournamentId],
             { prepare: true }
         );
 
-        // 3) sort by points desc
-        const rows = result.rows.slice().sort((a, b) => {
-            const pa = a.points || 0;
-            const pb = b.points || 0;
-            return pb - pa;
+        const standings = [];
+
+        for (const row of lbRes.rows) {
+            const playerId = row.player_id;
+            const points = row.points;
+
+            // fetch player details
+            const pRes = await cassandra.execute(
+                'SELECT first_name, rating FROM players WHERE player_id = ?',
+                [playerId],
+                { prepare: true }
+            );
+
+            let name = null;
+            let rating = null;
+
+            if (pRes.rowLength) {
+                name = pRes.rows[0].first_name;
+                rating = pRes.rows[0].rating;
+            }
+
+            standings.push({
+                playerId,
+                name,      // <-- UI expects "name"
+                rating,    // <-- UI shows rating if present
+                points
+            });
+        }
+
+        // sort by descending points
+        standings.sort((a, b) => b.points - a.points);
+
+        // give each a rank
+        standings.forEach((s, i) => {
+            s.rank = i + 1;
         });
 
-        // 4) add rank numbers
-        const standings = rows.map((row, idx) => ({
-            rank: idx + 1,
-            playerId: row.player_id.toString(),
-            points: row.points || 0
-        }));
-
-        return res.json({
-            tournamentId: id,
+        res.json({
+            tournamentId,
             standings
         });
+
     } catch (err) {
-        console.error('[ERROR] getTournamentStandings failed:', err);
-        return res.status(500).json({ error: 'Internal server error' });
+        console.error('[ERROR] getStandings:', err);
+        res.status(500).json({ error: 'Internal server error' });
     }
 }
 
+
 async function completeRound(req, res) {
+    const tournamentId = req.params.id;
+    const round = parseInt(req.params.round, 10);
+
+    if (!round || isNaN(round)) {
+        return res.status(400).json({ error: 'Invalid round' });
+    }
+
     try {
-        const tournamentId = req.params.id;
-        const roundParam = req.params.round;
-
-        // round comes as string -> convert
-        const round = parseInt(roundParam, 10);
-        if (Number.isNaN(round)) {
-            return res.status(400).json({ error: 'Invalid round number' });
-        }
-
         // 1) Load matches for this round
-        const matchesResult = await cassandra.execute(
+        const mRes = await cassandra.execute(
             `
-            SELECT game_id, result
+            SELECT board_number, white_player, black_player, result
             FROM matches
             WHERE tournament_id = ? AND round = ?
             `,
@@ -505,31 +517,42 @@ async function completeRound(req, res) {
             { prepare: true }
         );
 
-        if (matchesResult.rowLength === 0) {
-            return res.status(404).json({
-                error: 'No matches found for this round',
-                tournamentId,
-                round
-            });
+        if (!mRes.rowLength) {
+            return res.status(404).json({ error: 'No matches for this round' });
         }
 
-        // 2) Check if all matches have a result
-        const rows = matchesResult.rows;
-        const unfinished = rows
-            .filter(r => !r.result)       // null / undefined
-            .map(r => r.game_id);         // list of unfinished game_ids
+        // Check all matches completed & collect winners
+        const winners = [];
+        for (const row of mRes.rows) {
+            const resStr = row.result;
 
-        if (unfinished.length > 0) {
-            return res.status(400).json({
-                roundCompleted: false,
-                reason: 'Some games are still unfinished',
-                unfinishedGames: unfinished
-            });
+            if (!resStr) {
+                return res.status(400).json({
+                    roundCompleted: false,
+                    reason: `Board ${row.board_number} has no result yet`
+                });
+            }
+
+            if (resStr === '1-0') {
+                winners.push(row.white_player);
+            } else if (resStr === '0-1') {
+                winners.push(row.black_player);
+            } else if (resStr === '1/2-1/2') {
+                // Draw in KO -> requires admin resolve-draw
+                return res.status(400).json({
+                    roundCompleted: false,
+                    reason: `Board ${row.board_number} is a draw (1/2-1/2); resolve it first.`
+                });
+            } else {
+                return res.status(400).json({
+                    roundCompleted: false,
+                    reason: `Unknown result "${resStr}" on board ${row.board_number}`
+                });
+            }
         }
 
-        // 3) All matches finished -> mark round finished
+        // 2) Mark round as finished
         const now = new Date();
-
         await cassandra.execute(
             `
             UPDATE rounds_by_tournament
@@ -540,13 +563,50 @@ async function completeRound(req, res) {
             { prepare: true }
         );
 
-        return res.status(200).json({
-            roundCompleted: true,
-            tournamentId,
-            round,
-            finishedAt: now
-        });
+        // 3) Check tournament type
+        const tRes = await cassandra.execute(
+            'SELECT type, status FROM tournaments WHERE tournament_id = ?',
+            [tournamentId],
+            { prepare: true }
+        );
 
+        if (!tRes.rowLength) {
+            return res.status(404).json({ error: 'Tournament not found' });
+        }
+
+        const tRow = tRes.rows[0];
+        const type = tRow.type;
+        // const status = tRow.status; // if you need it
+
+        let championId = null;
+
+        if (type === 'single_elim') {
+            // For single_elim we say: if this round produced exactly ONE winner,
+            // that is the champion -> finish tournament.
+            const uniqueWinners = [...new Set(winners.map(w => w.toString()))];
+
+            if (uniqueWinners.length === 1) {
+                // one person left
+                championId = winners[0];
+
+                await cassandra.execute(
+                    `
+                    UPDATE tournaments
+                    SET status = ?, winner_id = ?
+                    WHERE tournament_id = ?
+                    `,
+                    ['finished', championId, tournamentId],
+                    { prepare: true }
+                );
+            }
+        }
+
+        return res.json({
+            roundCompleted: true,
+            round,
+            championDecided: !!championId,
+            championId: championId || null
+        });
     } catch (err) {
         console.error('[ERROR] completeRound:', err);
         return res.status(500).json({ error: 'Internal server error' });
@@ -712,6 +772,8 @@ async function resolveDraw(req, res) {
             `[INFO] resolveDraw: match updated to ${newResult} for tournament=${tournamentId} round=${round} board=${boardNumber}`
         );
 
+
+
         return res.status(200).json({
             ok: true,
             tournamentId,
@@ -732,18 +794,161 @@ async function resolveDraw(req, res) {
     }
 }
 
-async function listRoundMatches(req, res) {
+async function listTournaments(req, res) {
+    try {
+        const result = await cassandra.execute(
+            `
+            SELECT tournament_id, name, location, start_date, end_date,
+                   status, type, time_control, created_at
+            FROM tournaments
+            `,
+            [],
+            { prepare: true }
+        );
+
+        const tournaments = result.rows.map(row => ({
+            id: row.tournament_id,
+            name: row.name,
+            location: row.location,
+            startDate: row.start_date,
+            endDate: row.end_date,
+            status: row.status,
+            type: row.type,
+            timeControl: row.time_control,
+            createdAt: row.created_at,
+        }));
+
+        res.json({ tournaments });
+    } catch (err) {
+        console.error('[ERROR] listTournaments:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+// controllers/tournamentController.js
+
+async function listRounds(req, res) {
+    try {
+        const tournamentId = req.params.id;
+
+        const result = await cassandra.execute(
+            `
+            SELECT round, started_at, finished_at
+            FROM rounds_by_tournament
+            WHERE tournament_id = ?
+            `,
+            [tournamentId],
+            { prepare: true }
+        );
+
+        const rounds = result.rows
+            .map(r => ({
+                round: r.round,
+                startedAt: r.started_at,
+                finishedAt: r.finished_at,
+            }))
+            .sort((a, b) => a.round - b.round);
+
+        return res.json({
+            tournamentId,
+            rounds,
+        });
+    } catch (err) {
+        console.error('[ERROR] listRounds:', err);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+}
+
+async function getTournamentInfo(req, res) {
+    try {
+        const tournamentId = req.params.id;
+
+        const result = await cassandra.execute(
+            `
+            SELECT tournament_id, name, location,
+                   start_date, end_date, status,
+                   type, time_control, created_at,
+                   winner_id
+            FROM tournaments
+            WHERE tournament_id = ?
+            `,
+            [tournamentId],
+            { prepare: true }
+        );
+
+        if (!result.rowLength) {
+            return res.status(404).json({ error: 'Tournament not found' });
+        }
+
+        const row = result.rows[0];
+
+        const winnerId = row.winner_id || null;
+        let winnerName = null;
+
+        if (winnerId) {
+            const pRes = await cassandra.execute(
+                'SELECT first_name, rating FROM players WHERE player_id = ?',
+                [winnerId],
+                { prepare: true }
+            );
+            if (pRes.rowLength) {
+                winnerName = pRes.rows[0].first_name;
+            }
+        }
+
+        // ✅ Only ONE response
+        return res.json({
+            tournamentId: row.tournament_id,
+            name: row.name,
+            location: row.location,
+            startDate: row.start_date,
+            endDate: row.end_date,
+            status: row.status,
+            type: row.type,
+            timeControl: row.time_control,
+            createdAt: row.created_at,
+            winnerId,
+            winnerName,
+        });
+    } catch (err) {
+        console.error('[ERROR] getTournamentInfo:', err);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    }
+}
+
+async function loadPlayerMap(playerIds) {
+    if (!playerIds || playerIds.length === 0) return {};
+
+    const map = {};
+    // simple version: 1 query per player (fine for your current scale)
+    for (const pid of playerIds) {
+        const res = await cassandra.execute(
+            'SELECT player_id, first_name, rating FROM players WHERE player_id = ?',
+            [pid],
+            { prepare: true }
+        );
+        if (res.rowLength) {
+            const row = res.rows[0];
+            map[pid.toString()] = {
+                name: row.first_name,
+                rating: row.rating
+            };
+        }
+    }
+    return map;
+}
+
+
+async function getRoundMatches(req, res) {
     try {
         const tournamentId = req.params.id;
         const round = parseInt(req.params.round, 10);
 
-        if (!Number.isInteger(round)) {
-            return res.status(400).json({ error: 'round must be an integer' });
-        }
-
         const result = await cassandra.execute(
             `
-            SELECT round, board_number, game_id, white_player, black_player, result
+            SELECT board_number, game_id, white_player, black_player, result
             FROM matches
             WHERE tournament_id = ? AND round = ?
             `,
@@ -751,28 +956,41 @@ async function listRoundMatches(req, res) {
             { prepare: true }
         );
 
-        // sort by board_number
-        const rows = result.rows.sort((a, b) => a.board_number - b.board_number);
-
-        const matches = rows.map(r => ({
-            round: r.round,
+        const matchesRaw = result.rows.map(r => ({
             boardNumber: r.board_number,
-            gameId: r.game_id,
-            whitePlayer: r.white_player,
-            blackPlayer: r.black_player,
-            result: r.result || null
+            gameId: r.game_id.toString(),
+            whitePlayer: r.white_player.toString(),
+            blackPlayer: r.black_player.toString(),
+            result: r.result || ""
         }));
 
-        return res.json({
+        // ⬇️ NEW: enrich with names
+        const allIds = new Set();
+        for (const m of matchesRaw) {
+            allIds.add(m.whitePlayer);
+            allIds.add(m.blackPlayer);
+        }
+        const playerMap = await loadPlayerMap(Array.from(allIds));
+
+        const matches = matchesRaw.map(m => ({
+            ...m,
+            whiteName: playerMap[m.whitePlayer]?.name || null,
+            whiteRating: playerMap[m.whitePlayer]?.rating ?? null,
+            blackName: playerMap[m.blackPlayer]?.name || null,
+            blackRating: playerMap[m.blackPlayer]?.rating ?? null
+        }));
+
+        res.json({
             tournamentId,
             round,
             matches
         });
     } catch (err) {
-        console.error('[ERROR] listRoundMatches:', err);
+        console.error('[ERROR] getRoundMatches:', err);
         res.status(500).json({ error: 'Internal server error' });
     }
 }
+
 
 
 
@@ -784,5 +1002,8 @@ module.exports = {
     getStandings,
     completeRound,
     resolveDraw,
-    listRoundMatches
+    listTournaments,
+    getTournamentInfo,
+    listRounds,
+    getRoundMatches
 };

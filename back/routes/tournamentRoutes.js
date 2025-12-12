@@ -9,7 +9,11 @@ const {
     getStandings,
     completeRound,
     resolveDraw,
-    listRoundMatches
+    listRoundMatches,
+    listTournaments,
+    listRounds,
+    getTournamentInfo,
+    getRoundMatches
 } = require('../controllers/tournamentController');
 
 // POST /api/tournaments
@@ -21,7 +25,7 @@ router.post('/:id/register', registerPlayer);
 // GET /api/tournaments/:id/players
 router.get('/:id/players', listTournamentPlayers);
 
-router.get('/:id/rounds/:round/matches', listRoundMatches);
+router.get('/:id/rounds/:round/matches', getRoundMatches);
 
 // Start a round 
 router.post('/:id/start', startRound);
@@ -37,5 +41,13 @@ router.post(
     '/:id/rounds/:round/boards/:board/resolve-draw',
     resolveDraw
 )
+
+router.get('/:id/rounds', listRounds);
+
+
+router.get('/', listTournaments)
+
+router.get('/:id', getTournamentInfo);
+
 
 module.exports = router;

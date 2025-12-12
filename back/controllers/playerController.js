@@ -35,6 +35,29 @@ async function createPlayer(req, res) {
     }
 }
 
+async function loadPlayerMap(playerIds) {
+    if (!playerIds || playerIds.length === 0) return {};
+
+    const map = {};
+    // simple version: 1 query per player (fine for your current scale)
+    for (const pid of playerIds) {
+        const res = await cassandra.execute(
+            'SELECT player_id, name, rating FROM players WHERE player_id = ?',
+            [pid],
+            { prepare: true }
+        );
+        if (res.rowLength) {
+            const row = res.rows[0];
+            map[pid.toString()] = {
+                name: row.name || null,
+                rating: row.rating || null
+            };
+        }
+    }
+    return map;
+}
+
+
 module.exports = {
     createPlayer,
 };
