@@ -9,15 +9,16 @@ export default function LOCAL_PLAY() {
 
     function updateGameInstance(newGame) {
         // normalize fen and trim whitespace
-        const fen = (newGame && typeof newGame.fen === 'function') ? String(newGame.fen()).trim() : '';
+        const fen =
+            newGame && typeof newGame.fen === "function" ? String(newGame.fen()).trim() : "";
 
-        console.log('[DEBUG] updateGameInstance fen=', fen);
+        console.log("[DEBUG] updateGameInstance fen=", fen);
 
         // update ref immediately
         gameRef.current = newGame;
 
         // update state synchronously to avoid forced remounts / flicker
-        setGame(newGame);        // optional: keep if other code reads `game` state
+        setGame(newGame); // optional: keep if other code reads `game` state
         setGamePosition(fen);
     }
 
@@ -31,6 +32,27 @@ export default function LOCAL_PLAY() {
 
     const [finished, setFinished] = useState(false);
 
+    // ---- CLOCK (server snapshot + local display ticking) ----
+    const [clock, setClock] = useState({
+        whiteMs: null,
+        blackMs: null,
+        active: null, // "w" | "b"
+        running: false,
+        serverNow: null, // epoch ms from server
+    });
+
+    const [displayClock, setDisplayClock] = useState({
+        whiteMs: null,
+        blackMs: null,
+    });
+
+    function formatMs(ms) {
+        if (ms == null) return "--:--";
+        const s = Math.floor(ms / 1000);
+        const mm = String(Math.floor(s / 60)).padStart(2, "0");
+        const ss = String(s % 60).padStart(2, "0");
+        return `${mm}:${ss}`;
+    }
 
     const query = new URLSearchParams(window.location.search);
     const gameId = query.get("game_id");
@@ -47,61 +69,89 @@ export default function LOCAL_PLAY() {
         socket.onopen = () => {
             // read persisted lastId only from localStorage to avoid recreating socket on updates
             const persisted = localStorage.getItem(`game:${gameId}:lastId`);
-            const clientLastId = persisted || '0-0';
-            console.log('[WS] open, sending resync lastId=', clientLastId);
-            socket.send(JSON.stringify({ type: 'resync', gameId, lastId: clientLastId }));
+            const clientLastId = persisted || "0-0";
+            console.log("[WS] open, sending resync lastId=", clientLastId);
+            socket.send(JSON.stringify({ type: "resync", gameId, lastId: clientLastId }));
         };
 
         socket.onclose = (ev) => {
-            console.log('[WS] closed', ev);
+            console.log("[WS] closed", ev);
         };
         socket.onerror = (err) => {
-            console.error('[WS] error', err);
+            console.error("[WS] error", err);
         };
 
         socket.onmessage = (msg) => {
             const data = JSON.parse(msg.data);
-            console.log('[WS IN]', data);
+            console.log("[WS IN]", data);
+
+            // CLOCK snapshot from server
+            if (data.type === "clock_state") {
+                setClock({
+                    whiteMs: data.whiteMs,
+                    blackMs: data.blackMs,
+                    active: data.active,
+                    running: !!data.running,
+                    serverNow: data.serverNow,
+                });
+                return;
+            }
 
             // log kicked messages so takeover is visible client-side
-            if (data.type === 'kicked') {
-                console.warn('[WS] received kicked:', data.reason);
+            if (data.type === "kicked") {
+                console.warn("[WS] received kicked:", data.reason);
             }
 
             // persist last seen id but DO NOT trigger socket recreation
             if (data.streamId) {
-                try { localStorage.setItem(`game:${gameId}:lastId`, data.streamId); } catch (e) { }
+                try {
+                    localStorage.setItem(`game:${gameId}:lastId`, data.streamId);
+                } catch (e) { }
                 lastStreamIdRef.current = data.streamId;
                 setLastStreamId(data.streamId);
             }
 
             // incoming undo request: only prompt for new/live requests, track pending ids
-            if (data.type === 'undo_request') {
-                console.log('[DEBUG] incoming undo_request', data);
+            if (data.type === "undo_request") {
+                console.log("[DEBUG] incoming undo_request", data);
                 // skip non-pending states
-                if (data.state && data.state !== 'pending') return;
+                if (data.state && data.state !== "pending") return;
 
-                const requestId = data.streamId || '';
+                const requestId = data.streamId || "";
                 // rely on server-provided state and server-side resync filtering.
                 // only dedupe locally so we don't prompt twice for the same requestId.
-                console.log('[DEBUG] undo_request received requestId=', requestId, 'state=', data.state, 'lastSeen=', lastStreamIdRef.current, 'pendingSet=', Array.from(pendingUndoRequestsRef.current));
+                console.log(
+                    "[DEBUG] undo_request received requestId=",
+                    requestId,
+                    "state=",
+                    data.state,
+                    "lastSeen=",
+                    lastStreamIdRef.current,
+                    "pendingSet=",
+                    Array.from(pendingUndoRequestsRef.current)
+                );
                 if (pendingUndoRequestsRef.current.has(requestId)) return;
 
-                const from = data.from || 'opponent';
+                const from = data.from || "opponent";
                 const accept = window.confirm(`${from} requested an undo. Accept?`);
                 if (!accept) {
-                    console.log('[DEBUG] sending undo_reject requestId=', requestId);
+                    console.log("[DEBUG] sending undo_reject requestId=", requestId);
                     pendingUndoRequestsRef.current.delete(requestId);
-                    socket.send(JSON.stringify({ type: 'undo_reject', requestId }));
+                    socket.send(JSON.stringify({ type: "undo_reject", requestId }));
                     return; // handled
                 }
 
                 // Try non-mutating replay using SAN history (more robust)
                 const sanHistory = gameRef.current.history(); // array of SAN strings
-                console.log('[DEBUG] sanHistory length=', sanHistory.length, 'lastMoves=', sanHistory.slice(-6));
+                console.log(
+                    "[DEBUG] sanHistory length=",
+                    sanHistory.length,
+                    "lastMoves=",
+                    sanHistory.slice(-6)
+                );
                 if (sanHistory.length === 0) {
-                    console.log('[DEBUG] no history to compute undo -> rejecting', requestId);
-                    socket.send(JSON.stringify({ type: 'undo_reject', requestId }));
+                    console.log("[DEBUG] no history to compute undo -> rejecting", requestId);
+                    socket.send(JSON.stringify({ type: "undo_reject", requestId }));
                     return;
                 }
 
@@ -115,42 +165,53 @@ export default function LOCAL_PLAY() {
                     // undo last ply (call twice if you want to undo a full move pair)
                     clone.undo();
                     const resultFen = clone.fen();
-                    console.log('[DEBUG] replay succeeded resultFen=', resultFen);
+                    console.log("[DEBUG] replay succeeded resultFen=", resultFen);
 
-                    const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+                    const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                     // guard: if computed fen is the starting position but we had moves, don't trust it
                     if (resultFen === START_FEN && sanHistory.length > 0) {
-                        console.warn('[WARN] computed START_FEN from replay despite moves — falling back to server-side lookup');
-                        console.log('[DEBUG] sending undo_accept (no fen) requestId=', requestId);
-                        socket.send(JSON.stringify({
-                            type: 'undo_accept',
-                            requestId: requestId
-                        }));
+                        console.warn(
+                            "[WARN] computed START_FEN from replay despite moves — falling back to server-side lookup"
+                        );
+                        console.log("[DEBUG] sending undo_accept (no fen) requestId=", requestId);
+                        socket.send(
+                            JSON.stringify({
+                                type: "undo_accept",
+                                requestId: requestId,
+                            })
+                        );
                         return;
                     }
 
-                    console.log('[DEBUG] sending undo_accept fen=', resultFen, 'requestId=', requestId);
+                    console.log("[DEBUG] sending undo_accept fen=", resultFen, "requestId=", requestId);
                     pendingUndoRequestsRef.current.add(requestId);
-                    socket.send(JSON.stringify({
-                        type: 'undo_accept',
-                        fen: resultFen,
-                        requestId
-                    }));
+                    socket.send(
+                        JSON.stringify({
+                            type: "undo_accept",
+                            fen: resultFen,
+                            requestId,
+                        })
+                    );
                 } catch (err) {
-                    console.warn('[DEBUG] replay failed, falling back to server-side previous-FEN lookup', err);
+                    console.warn(
+                        "[DEBUG] replay failed, falling back to server-side previous-FEN lookup",
+                        err
+                    );
                     // send accept without fen; server will use recent-FEN list to compute
                     pendingUndoRequestsRef.current.add(requestId);
-                    console.log('[DEBUG] sending undo_accept (no fen) requestId=', requestId);
-                    socket.send(JSON.stringify({
-                        type: 'undo_accept',
-                        requestId
-                    }));
+                    console.log("[DEBUG] sending undo_accept (no fen) requestId=", requestId);
+                    socket.send(
+                        JSON.stringify({
+                            type: "undo_accept",
+                            requestId,
+                        })
+                    );
                 }
                 return; // handled
             }
 
             // Apply a snapshot from server (fast resync)
-            if (data.type === 'snapshot') {
+            if (data.type === "snapshot") {
                 const snapshotFen = data.fen;
                 if (snapshotFen) {
                     const g = new Chess(snapshotFen);
@@ -164,8 +225,6 @@ export default function LOCAL_PLAY() {
             console.log("Received message:", msg.data);
 
             if (data.type === "move") {
-
-
                 // apply move on a fresh instance derived from current authoritative state
                 const g = new Chess(gameRef.current.fen());
                 const move = g.move(data.move);
@@ -175,28 +234,28 @@ export default function LOCAL_PLAY() {
                 }
                 updateGameInstance(g);
 
-                // use the fresh instance (g) not the stale `game` state
-
                 if (g.isGameOver() || g.isDraw()) {
                     let result = null;
                     let reason = null;
 
                     if (g.isCheckmate()) {
-                        result = (move.color === 'w') ? '1-0' : '0-1';
-                        reason = 'checkmate';
+                        result = move.color === "w" ? "1-0" : "0-1";
+                        reason = "checkmate";
                     } else if (g.isDraw()) {
-                        result = '1/2-1/2';
-                        reason = 'draw';
+                        result = "1/2-1/2";
+                        reason = "draw";
                     }
 
                     if (socket.readyState === WebSocket.OPEN && result) {
-                        socket.send(JSON.stringify({
-                            type: 'game_over',
-                            gameId,
-                            result,
-                            reason,
-                            fen: g.fen()
-                        }));
+                        socket.send(
+                            JSON.stringify({
+                                type: "game_over",
+                                gameId,
+                                result,
+                                reason,
+                                fen: g.fen(),
+                            })
+                        );
                     }
                 }
 
@@ -204,29 +263,24 @@ export default function LOCAL_PLAY() {
             }
 
             // Handle game_result and game_over messages (final results)
-            if (data.type === 'game_result') {
-                const myColor = colorFromURL;  // "w" or "b"
-                let message = 'Game over';
+            if (data.type === "game_result") {
+                const myColor = colorFromURL; // "w" or "b"
+                let message = "Game over";
 
-                if (data.result === '1-0') {
-                    message = (myColor === 'w') ? 'You won! (1-0)' : 'You lost. (0-1)';
-                } else if (data.result === '0-1') {
-                    message = (myColor === 'b') ? 'You won! (0-1)' : 'You lost. (1-0)';
-                } else if (data.result === '1/2-1/2') {
-                    message = 'Draw. (½–½)';
+                if (data.result === "1-0") {
+                    message = myColor === "w" ? "You won! (1-0)" : "You lost. (0-1)";
+                } else if (data.result === "0-1") {
+                    message = myColor === "b" ? "You won! (0-1)" : "You lost. (1-0)";
+                } else if (data.result === "1/2-1/2") {
+                    message = "Draw. (½–½)";
                 }
 
-                setFinished(true);   // 👈 mark game as finished
+                setFinished(true); // 👈 mark game as finished
 
-                // let React paint if needed, then show
                 setTimeout(() => {
                     alert(message);
                 }, 200);
 
-
-
-                // optional: you can set some local state like `setGameFinished(true);`
-                // and use that to disable onDrop.
                 return;
             }
 
@@ -234,7 +288,10 @@ export default function LOCAL_PLAY() {
                 // prefer server-provided fen if present
                 if (data.fen) {
                     // if we applied an optimistic reset locally and the server fen matches, skip re-applying
-                    if (optimisticResetRef.current && optimisticResetFenRef.current === String(data.fen).trim()) {
+                    if (
+                        optimisticResetRef.current &&
+                        optimisticResetFenRef.current === String(data.fen).trim()
+                    ) {
                         optimisticResetRef.current = false;
                         optimisticResetFenRef.current = null;
                         return;
@@ -270,24 +327,54 @@ export default function LOCAL_PLAY() {
         setPlayerColor(colorFromURL);
 
         return () => {
-            try { socket.close(); } catch (e) { }
+            try {
+                socket.close();
+            } catch (e) { }
         };
     }, [gameId, colorFromURL]); // removed lastStreamId to avoid reconnect races
+
+    // ---- CLOCK local ticking (UI only) ----
+    useEffect(() => {
+        // if clock not running yet, just mirror snapshot values
+        if (!clock.running || !clock.serverNow) {
+            setDisplayClock({
+                whiteMs: clock.whiteMs,
+                blackMs: clock.blackMs,
+            });
+            return;
+        }
+
+        let raf;
+
+        const tick = () => {
+            const now = Date.now();
+            const elapsed = now - clock.serverNow;
+
+            let w = clock.whiteMs;
+            let b = clock.blackMs;
+
+            if (clock.active === "w") {
+                w = Math.max(0, clock.whiteMs - elapsed);
+            } else if (clock.active === "b") {
+                b = Math.max(0, clock.blackMs - elapsed);
+            }
+
+            setDisplayClock({ whiteMs: w, blackMs: b });
+            raf = requestAnimationFrame(tick);
+        };
+
+        raf = requestAnimationFrame(tick);
+        return () => cancelAnimationFrame(raf);
+    }, [clock]);
 
     function onDrop(sourceSquare, targetSquare, piece) {
         try {
             if (finished) {
-                console.log('[DEBUG] move ignored: game is finished');
+                console.log("[DEBUG] move ignored: game is finished");
                 return false;
             }
 
-            if ((playerColor === "w" && piece[0] !== "w") ||
-                (playerColor === "b" && piece[0] !== "b")) {
-                return false;
-            }
-
-            if ((playerColor === "w" && piece[0] !== "w") ||
-                (playerColor === "b" && piece[0] !== "b")) {
+            if ((playerColor === "w" && piece[0] !== "w") || (playerColor === "b" && piece[0] !== "b")) {
                 return false;
             }
 
@@ -296,38 +383,40 @@ export default function LOCAL_PLAY() {
             const move = g.move({
                 from: sourceSquare,
                 to: targetSquare,
-                promotion: piece[1]?.toLowerCase() ?? "q"
+                promotion: piece[1]?.toLowerCase() ?? "q",
             });
             if (move === null) return false;
             updateGameInstance(g);
 
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: "move",
-                    move: move,
-                    fen: g.fen() // send the authoritative FEN from the fresh instance
-                }));
+                ws.send(
+                    JSON.stringify({
+                        type: "move",
+                        move: move,
+                        fen: g.fen(), // send the authoritative FEN from the fresh instance
+                    })
+                );
             }
 
             return true;
-
         } catch (error) {
             if (error) {
                 console.log("[INFO] Move not possible:", error);
             }
             console.log("An error occurred during the move. Please try again.");
+            return false;
         }
     }
 
     function undoMove() {
         if (finished) {
-            console.log('[DEBUG] undo ignored: game is finished');
+            console.log("[DEBUG] undo ignored: game is finished");
             return;
         }
 
-        console.log('[DEBUG] user clicked undo, sending undo_request');
+        console.log("[DEBUG] user clicked undo, sending undo_request");
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'undo_request' }));
+            ws.send(JSON.stringify({ type: "undo_request" }));
         } else {
             const g = new Chess(gameRef.current.fen());
             g.undo();
@@ -337,7 +426,7 @@ export default function LOCAL_PLAY() {
 
     function resetGame() {
         if (finished) {
-            console.log('[DEBUG] reset ignored: game is finished');
+            console.log("[DEBUG] reset ignored: game is finished");
             return;
         }
 
@@ -353,16 +442,29 @@ export default function LOCAL_PLAY() {
         }
     }
 
-
     // debug: watch gamePosition updates
     useEffect(() => {
-        console.log('[DEBUG] gamePosition updated =>', gamePosition);
+        console.log("[DEBUG] gamePosition updated =>", gamePosition);
     }, [gamePosition]);
 
     return (
         <div>
             <h2>Game ID: {gameId}</h2>
             <h3>You are playing as: {playerColor === "w" ? "White" : "Black"}</h3>
+
+            {/* CLOCK UI */}
+            <div style={{ marginBottom: 12, fontFamily: "monospace" }}>
+                <div style={{ fontWeight: clock.active === "w" && clock.running ? "bold" : "normal" }}>
+                    ⏱ White: {formatMs(displayClock.whiteMs)}{" "}
+                    {clock.active === "w" && clock.running ? "⬅" : ""}
+                </div>
+
+                <div style={{ fontWeight: clock.active === "b" && clock.running ? "bold" : "normal" }}>
+                    ⏱ Black: {formatMs(displayClock.blackMs)}{" "}
+                    {clock.active === "b" && clock.running ? "⬅" : ""}
+                </div>
+            </div>
+
             <Chessboard
                 boardWidth={400}
                 customNotationStyle={{ color: "#000", fontWeight: "bold" }}
@@ -371,10 +473,11 @@ export default function LOCAL_PLAY() {
                 onPieceDrop={onDrop}
                 customBoardStyle={{
                     borderRadius: "4px",
-                    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.5)"
+                    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.5)",
                 }}
                 boardOrientation={playerColor === "w" ? "white" : "black"}
             />
+
             <button onClick={resetGame}>Reset</button>
             <button onClick={undoMove}>Undo</button>
         </div>

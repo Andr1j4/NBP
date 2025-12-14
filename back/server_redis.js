@@ -1,14 +1,13 @@
+// server.js
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { createClient } = require('redis');
 const cassandra = require('./db/cassandra');
-
-// / note: no chess.js on backend — compute undo by reading previous persisted FENs from the stream
+const gameRoutes = require("./routes/gameRoutes");
+const cors = require('cors');
 
 const app = express();
 const PORT = 8080;
-
-const cors = require('cors');
 
 app.use(cors({
     origin: [
@@ -18,21 +17,19 @@ app.use(cors({
     ]
 }));
 
-const playerRoutes = require('./routes/playerRoutes');
-const tournamentRoutes = require('./routes/tournamentRoutes');
-
-
 app.use(express.json());
 
 // mount REST routes
+app.use("/api/games", gameRoutes);
+const playerRoutes = require('./routes/playerRoutes');
+const tournamentRoutes = require('./routes/tournamentRoutes');
 app.use('/api/players', playerRoutes);
 app.use('/api/tournaments', tournamentRoutes);
-
-
 
 // Redis setup
 const redis = createClient({ url: 'redis://192.168.122.230:6379' });
 redis.connect();
+app.locals.redis = redis;
 
 const server = app.listen(PORT, () => {
     console.log(`[INFO] Server started on port ${PORT}`);
@@ -40,13 +37,84 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocketServer({ server });
 
+/**
+ * ===================== CLOCK TICKERS (PER GAME) =====================
+ * Without this, timeout is only detected when a message arrives (move/resync/etc).
+ * With this, timeout is detected even when nobody is moving.
+ */
+const gameTickers = new Map(); // gameId -> intervalId
+
+function startGameTicker(gameId) {
+    if (!gameId) return;
+    if (gameTickers.has(gameId)) return; // already running
+
+    const intervalId = setInterval(async () => {
+        const streamKey = `game:${gameId}`;
+
+        try {
+            // If finished -> stop ticker
+            const meta = await redis.hGetAll(`${streamKey}:meta`);
+            if (meta && meta.finished === "1") {
+                stopGameTicker(gameId);
+                return;
+            }
+
+            const clock = await getOrInitClock(redis, cassandra, gameId);
+            if (!clock.running) return; // nothing to tick
+
+            const nowMs = Date.now();
+            const settle = settleClock(clock, nowMs);
+
+            // persist/broadcast the updated clock (smooth countdown)
+            await saveClock(redis, gameId, clock);
+            broadcastClock(wss, gameId, clock);
+
+            if (settle.flag) {
+                const loser = settle.loser;               // "w" | "b"
+                const winner = loser === "w" ? "b" : "w";
+                const result = loser === "w" ? "0-1" : "1-0";
+                const reason = "timeout";
+                const finalFen = (await redis.get(`${streamKey}:fen`)) || "";
+
+                try {
+                    await handleGameOver({
+                        gameId,
+                        result,
+                        reason,
+                        finalFen,
+                        endTime: new Date(),
+                        loser,
+                        winner,
+                        wss,
+                        redis,
+                        cassandra
+                    });
+                } catch (e) {
+                    console.error("[ERROR] handleGameOver(timeout ticker) failed:", e);
+                } finally {
+                    stopGameTicker(gameId);
+                }
+            }
+        } catch (e) {
+            console.warn(`[clock] ticker error game=${gameId}`, e);
+        }
+    }, 100); // 100ms feels real-time without being too heavy
+
+    gameTickers.set(gameId, intervalId);
+}
+
+function stopGameTicker(gameId) {
+    const id = gameTickers.get(gameId);
+    if (id) clearInterval(id);
+    gameTickers.delete(gameId);
+}
+
 wss.on('connection', async (ws, req) => {
     const [, gameId, color] = req.url.split('/');
     const streamKey = `game:${gameId}`;
-    ws.gameId = gameId; // Store gameId in the WebSocket object for later reference
-    ws.color = color; // store player color so we can attribute requests/accepts
 
-
+    ws.gameId = gameId;
+    ws.color = color;
 
     console.log(`[INFO] New WebSocket connection: gameId=${gameId}, color=${color}`);
 
@@ -62,20 +130,12 @@ wss.on('connection', async (ws, req) => {
 
             // ✅ Spectator = read-only: allow only resync
             if (ws.color === 'spectator' && data.type !== 'resync') {
-                console.log(
-                    `[INFO] Ignoring ${data.type} from spectator on game ${gameId}`
-                );
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    reason: 'spectator_read_only'
-                }));
+                ws.send(JSON.stringify({ type: 'error', reason: 'spectator_read_only' }));
                 return;
             }
 
-
-            // Block *most* messages if the game is finished, but still allow resync so reconnects can see final board/result
+            // Block most messages if finished (still allow resync and game_over)
             if (isFinished && !isResync && !isGameOverMessage) {
-                console.log(`[INFO] Ignoring ${data.type} for finished game ${gameId}`);
                 ws.send(JSON.stringify({
                     type: 'game_finished',
                     gameId,
@@ -86,24 +146,85 @@ wss.on('connection', async (ws, req) => {
                 return;
             }
 
-
-
-
+            // ===================== MOVE =====================
             if (data.type === 'move') {
+                // --- CLOCK: settle time, apply increment, switch active ---
+                const nowMs = Date.now();
+                const clock = await getOrInitClock(redis, cassandra, gameId);
+
+                // First move starts the clock (based on who actually moved)
+                if (!clock.running) {
+                    clock.running = true;
+                    const mover0 = ws.color === "b" ? "b" : "w";
+                    clock.active = mover0;
+                    clock.last_tick = nowMs;
+
+                    // ✅ start per-game timeout ticker now
+                    startGameTicker(gameId);
+                }
+
+                // settle active time
+                const settle = settleClock(clock, nowMs);
+
+                // TIMEOUT -> finish via handleGameOver (DB + archive + broadcast)
+                if (settle.flag) {
+                    const loser = settle.loser;                 // "w" | "b"
+                    const winner = loser === "w" ? "b" : "w";
+                    const result = loser === "w" ? "0-1" : "1-0";
+                    const reason = "timeout";
+
+                    const finalFen = (await redis.get(`${streamKey}:fen`)) || "";
+
+                    // persist/broadcast final clock snapshot
+                    await saveClock(redis, gameId, clock);
+                    broadcastClock(wss, gameId, clock);
+
+                    try {
+                        await handleGameOver({
+                            gameId,
+                            result,
+                            reason,
+                            finalFen,
+                            endTime: new Date(),
+                            loser,
+                            winner,
+                            wss,
+                            redis,
+                            cassandra
+                        });
+                    } catch (e) {
+                        console.error("[ERROR] handleGameOver(timeout) failed:", e);
+                    } finally {
+                        stopGameTicker(gameId);
+                    }
+                    return;
+                }
+
+                // apply increment to mover
+                const mover = ws.color === "b" ? "b" : "w";
+                if (mover === "w") clock.w_ms += (clock.inc_ms || 0);
+                else clock.b_ms += (clock.inc_ms || 0);
+
+                // switch active
+                clock.active = mover === "w" ? "b" : "w";
+                clock.last_tick = nowMs;
+
+                await saveClock(redis, gameId, clock);
+                broadcastClock(wss, gameId, clock);
+
+                // --- your stream persistence/broadcast ---
                 const fen = data.fen || '';
                 const id = await redis.xAdd(streamKey, '*', {
                     type: 'move',
                     move: JSON.stringify(data.move),
                     fen
                 });
-                // update snapshot so reconnects are fast
+
                 if (fen) await redis.set(`${streamKey}:fen`, fen);
-                // maintain small recent-FEN list for fast undo/resync without chess logic
                 if (fen) {
                     await redis.rPush(`${streamKey}:fens`, fen);
                     await redis.lTrim(`${streamKey}:fens`, -1000, -1);
                 }
-                console.log(`[INFO] Added move to stream ${streamKey} with ID ${id}`);
 
                 wss.clients.forEach((client) => {
                     if (client !== ws && client.readyState === 1 && client.gameId === gameId) {
@@ -115,19 +236,20 @@ wss.on('connection', async (ws, req) => {
                         }));
                     }
                 });
+
+                return;
             }
 
-
+            // ===================== UNDO (direct) =====================
             if (data.type === 'undo') {
-                // prefer client-provided fen (client updated its state), otherwise use snapshot
                 const fen = (data.fen && data.fen.length) ? data.fen : (await redis.get(`${streamKey}:fen`)) || '';
                 const id = await redis.xAdd(streamKey, '*', { type: 'undo', fen });
+
                 if (fen) {
                     await redis.set(`${streamKey}:fen`, fen);
                     await redis.rPush(`${streamKey}:fens`, fen);
                     await redis.lTrim(`${streamKey}:fens`, -1000, -1);
                 }
-                console.log(`[INFO] Executed undo on stream ${streamKey} with ID ${id}`);
 
                 wss.clients.forEach((client) => {
                     if (client !== ws && client.readyState === 1 && client.gameId === gameId) {
@@ -138,22 +260,20 @@ wss.on('connection', async (ws, req) => {
                         }));
                     }
                 });
+
+                return;
             }
 
-            // Player requests an undo — record request and notify opponent(s)
+            // ===================== UNDO REQUEST =====================
             if (data.type === 'undo_request') {
-                console.log(`[DEBUG] Received undo_request from ${ws.color} raw=${JSON.stringify(data)}`);
                 const id = await redis.xAdd(streamKey, '*', {
                     type: 'undo_request',
                     from: ws.color || data.from || 'unknown',
-                    state: 'pending' // helpful metadata (immutable snapshot)
+                    state: 'pending'
                 });
-                console.log(`[INFO] Persisted undo_request id=${id} from=${ws.color} stream=${streamKey}`);
 
-                // notify other clients (opponent) about the undo request
                 wss.clients.forEach((client) => {
                     if (client !== ws && client.readyState === 1 && client.gameId === gameId) {
-                        console.log(`[DEBUG] notifying client remote=${client._socket?.remoteAddress || 'unknown'} about undo_request id=${id}`);
                         client.send(JSON.stringify({
                             type: 'undo_request',
                             streamId: id,
@@ -163,27 +283,18 @@ wss.on('connection', async (ws, req) => {
                     }
                 });
 
-                // acknowledge requester so UI can show "request sent"
                 if (ws.readyState === 1) {
                     ws.send(JSON.stringify({ type: 'undo_request_sent', streamId: id, state: 'pending' }));
                 }
+                return;
             }
 
-            // Opponent accepted the undo request -> create a real 'undo' event and notify all clients
+            // ===================== UNDO ACCEPT =====================
             if (data.type === 'undo_accept') {
-                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
-                console.log(`[DEBUG] Received undo_accept from ${ws.color} requestId=${data.requestId} fenCandidatePresent=${!!data.fen}`);
-
                 let fenCandidate = '';
-                if (data.fen && data.fen.length) {
-                    fenCandidate = data.fen;
-                } else {
-                    fenCandidate = await getFenFromRecentList(streamKey, 1);
-                }
-                console.log(`[DEBUG] undo_accept chosen fenCandidate=${fenCandidate || '<empty>'} for requestId=${data.requestId}`);
+                if (data.fen && data.fen.length) fenCandidate = data.fen;
+                else fenCandidate = await getFenFromRecentList(streamKey, 1);
 
-                // persist + xAdd + broadcast (your existing code)
-                // store requestId so resync can correlate the response to the original undo_request
                 const id = await redis.xAdd(streamKey, '*', {
                     type: 'undo',
                     requestId: data.requestId || '',
@@ -191,17 +302,17 @@ wss.on('connection', async (ws, req) => {
                     fen: fenCandidate,
                     state: 'accepted'
                 });
-                console.log(`[INFO] Persisted undo (response) id=${id} requestId=${data.requestId} acceptedBy=${ws.color}`);
+
                 if (fenCandidate) {
                     await redis.set(`${streamKey}:fen`, fenCandidate);
                     await redis.rPush(`${streamKey}:fens`, fenCandidate);
                     await redis.lTrim(`${streamKey}:fens`, -1000, -1);
                 }
+
                 const persistedFen = (await redis.get(`${streamKey}:fen`)) || fenCandidate;
 
                 wss.clients.forEach((client) => {
                     if (client.readyState === 1 && client.gameId === gameId) {
-                        console.log(`[DEBUG] broadcasting undo accepted -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id} requestId=${data.requestId}`);
                         client.send(JSON.stringify({
                             type: 'undo',
                             streamId: id,
@@ -212,23 +323,20 @@ wss.on('connection', async (ws, req) => {
                         }));
                     }
                 });
+
+                return;
             }
 
-            // Optional: opponent rejected the undo request
+            // ===================== UNDO REJECT =====================
             if (data.type === 'undo_reject') {
-                // include requestId so we can correlate to undo_request
                 const id = await redis.xAdd(streamKey, '*', {
                     type: 'undo_reject',
                     requestId: data.requestId || '',
                     rejectedBy: ws.color || data.by || 'unknown',
                     state: 'rejected'
                 });
-                console.log(`[INFO] Persisted undo_reject id=${id} requestId=${data.requestId} rejectedBy=${ws.color}`);
-                console.log(`[INFO] Undo rejected on ${streamKey} with ID ${id} rejectedBy=${ws.color}`);
 
-                // notify the requester (and others) about rejection
                 wss.clients.forEach((client) => {
-                    console.log(`[DEBUG] broadcasting undo_reject -> client remote=${client._socket?.remoteAddress || 'unknown'} streamId=${id}`);
                     if (client.readyState === 1 && client.gameId === gameId) {
                         client.send(JSON.stringify({
                             type: 'undo_reject',
@@ -239,20 +347,21 @@ wss.on('connection', async (ws, req) => {
                         }));
                     }
                 });
+
+                return;
             }
 
+            // ===================== RESET =====================
             if (data.type === 'reset') {
                 const fen = data.fen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
                 const id = await redis.xAdd(streamKey, '*', { type: 'reset', fen });
-                // snapshot must reflect reset position
+
                 await redis.set(`${streamKey}:fen`, fen);
                 await redis.rPush(`${streamKey}:fens`, fen);
                 await redis.lTrim(`${streamKey}:fens`, -1000, -1);
-                console.log(`[INFO] Executed reset on stream ${streamKey} with ID ${id}`);
 
                 wss.clients.forEach((client) => {
                     if (client !== ws && client.readyState === 1 && client.gameId === gameId) {
-                        console.log(`[INFO] Resetting game for client gameId=${client.gameId}`);
                         client.send(JSON.stringify({
                             type: 'reset',
                             streamId: id,
@@ -260,20 +369,17 @@ wss.on('connection', async (ws, req) => {
                         }));
                     }
                 });
+
+                return;
             }
 
+            // ===================== RESYNC =====================
             if (data.type === 'resync') {
-                console.log(`[INFO] Resync requested for gameId=${gameId}, lastId=${data.lastId}`);
-
-                const streamKey = `game:${gameId}`;
-
-                // 1) Always send latest snapshot
                 const snapshotFen = await redis.get(`${streamKey}:fen`);
                 if (snapshotFen) {
                     ws.send(JSON.stringify({ type: 'snapshot', fen: snapshotFen }));
                 }
 
-                // 2) Check if game is finished -> send result too
                 const meta = await redis.hGetAll(`${streamKey}:meta`);
                 const finished = meta && meta.finished === '1';
 
@@ -283,354 +389,85 @@ wss.on('connection', async (ws, req) => {
                         gameId,
                         result: meta.result || '',
                         reason: meta.reason || 'finished',
+                        loser: meta.loser || null,
+                        winner: meta.winner || null,
                         finalFen: meta.finalFen || snapshotFen || null
                     }));
                 }
 
-                // 3) Do NOT xRead anything here – snapshot is the single source of truth
-                console.log('[DEBUG] Resync: snapshot only, no history replay');
+                // Send clock snapshot
+                try {
+                    const clock = await getOrInitClock(redis, cassandra, gameId);
+                    settleClock(clock, Date.now());
+                    await saveClock(redis, gameId, clock);
+
+                    ws.send(JSON.stringify({
+                        type: "clock_state",
+                        gameId,
+                        whiteMs: clock.w_ms,
+                        blackMs: clock.b_ms,
+                        active: clock.active,
+                        running: clock.running,
+                        incMs: clock.inc_ms,
+                        timeControl: clock.tc || null,
+                        serverNow: Date.now()
+                    }));
+                } catch (e) {
+                    console.warn("[clock] resync clock failed:", e);
+                }
+
                 return;
             }
 
-
-
+            // ===================== GAME OVER (from client) =====================
             if (data.type === 'game_over') {
                 const result = data.result || null;
                 const reason = data.reason || null;
-                const endFen = data.fen || null;
-                const endTime = new Date();
-                const gameIdFromWs = ws.gameId; // from URL
-
-                console.log(
-                    `[INFO] game_over received for game ${gameIdFromWs}: result=${result}, reason=${reason}`
-                );
+                const endFen = data.fen || (await redis.get(`${streamKey}:fen`)) || null;
 
                 try {
-                    // 1) Look up tournament/round/board from matches_by_game
-                    const matchRes = await cassandra.execute(
-                        `
-            SELECT tournament_id, round, board_number, white_player, black_player
-            FROM matches_by_game
-            WHERE game_id = ?
-            `,
-                        [gameIdFromWs],
-                        { prepare: true }
-                    );
-
-                    if (!matchRes.rowLength) {
-                        console.warn(
-                            `[WARN] game_over: no match found in matches_by_game for game_id=${gameIdFromWs}`
-                        );
-                        return;
-                    }
-
-                    const row = matchRes.rows[0];
-
-                    console.log(
-                        `[DEBUG] game_over: found match row=${JSON.stringify(row)} for game_id=${gameIdFromWs}`
-                    );
-                    const tournamentId = row.tournament_id;
-                    const round = row.round;
-                    const boardNumber = row.board_number;
-                    const whiteId = row.white_player;
-                    const blackId = row.black_player;
-
-                    // scoring: win = 1, draw = 0.5, loss = 0
-                    let whiteDelta = 0;
-                    let blackDelta = 0;
-
-                    if (result === '1-0') {
-                        whiteDelta = 1.0;
-                        blackDelta = 0.0;
-                    } else if (result === '0-1') {
-                        whiteDelta = 0.0;
-                        blackDelta = 1.0;
-                    } else if (result === '1/2-1/2') {
-                        whiteDelta = 0.5;
-                        blackDelta = 0.5;
-                    } else {
-                        console.warn(
-                            `[WARN] game_over: unknown result="${result}" – skipping leaderboard update`
-                        );
-                    }
-
-                    if (whiteDelta > 0 || blackDelta > 0) {
-                        // White
-                        const whiteLB = await cassandra.execute(
-                            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
-                            [tournamentId, whiteId],
-                            { prepare: true }
-                        );
-                        const whiteCurrent = whiteLB.rowLength ? whiteLB.rows[0].points : 0.0;
-                        const whiteNew = whiteCurrent + whiteDelta;
-
-                        await cassandra.execute(
-                            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
-                            [tournamentId, whiteId, whiteNew],
-                            { prepare: true }
-                        );
-
-                        // Black
-                        const blackLB = await cassandra.execute(
-                            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
-                            [tournamentId, blackId],
-                            { prepare: true }
-                        );
-                        const blackCurrent = blackLB.rowLength ? blackLB.rows[0].points : 0.0;
-                        const blackNew = blackCurrent + blackDelta;
-
-                        await cassandra.execute(
-                            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
-                            [tournamentId, blackId, blackNew],
-                            { prepare: true }
-                        );
-
-                        // mark game as finished in Redis and store result info
-                        await redis.hSet(`${streamKey}:meta`, {
-                            finished: '1',
-                            result: result || '',
-                            reason: reason || '',
-                            finalFen: endFen || ''
-                        });
-
-                        console.log(
-                            `[INFO] Updated leaderboard_by_player: white=${whiteId} -> ${whiteNew}, black=${blackId} -> ${blackNew}`
-                        );
-                    }
-
-                    // 2) Update matches row with result + end_time (+ final_fen if you added it)
-                    await cassandra.execute(
-                        `
-            UPDATE matches
-            SET result = ?, end_time = ?, final_fen = ?
-            WHERE tournament_id = ? AND round = ? AND board_number = ?
-            `,
-                        [result, endTime, endFen, tournamentId, round, boardNumber],
-                        { prepare: true }
-                    );
-
-                    // 3) Mirror the result into matches_by_game too
-                    await cassandra.execute(
-                        `
-            UPDATE matches_by_game
-            SET result = ?, end_time = ?
-            WHERE game_id = ?
-            `,
-                        [result, endTime, gameIdFromWs],
-                        { prepare: true }
-                    );
-
-                    console.log(
-                        `[INFO] Stored game result for tournament=${tournamentId} round=${round} board=${boardNumber} result=${result}`
-                    );
-
-                    // 4) AUTO: if all games in this round have results, mark round finished
-                    try {
-                        const rRes = await cassandra.execute(
-                            `
-                SELECT board_number, result
-                FROM matches
-                WHERE tournament_id = ? AND round = ?
-                `,
-                            [tournamentId, round],
-                            { prepare: true }
-                        );
-
-                        const unfinished = rRes.rows.filter(r => !r.result);
-                        if (unfinished.length === 0) {
-                            const nowRound = new Date();
-                            await cassandra.execute(
-                                `
-                    UPDATE rounds_by_tournament
-                    SET finished_at = ?
-                    WHERE tournament_id = ? AND round = ?
-                    `,
-                                [nowRound, tournamentId, round],
-                                { prepare: true }
-                            );
-                            console.log(
-                                `[INFO] Auto-marked round ${round} finished for tournament ${tournamentId}`
-                            );
-
-                            // 5) OPTIONAL: auto-finish non-KO tournaments & set winner
-                            const tRes = await cassandra.execute(
-                                'SELECT type FROM tournaments WHERE tournament_id = ?',
-                                [tournamentId],
-                                { prepare: true }
-                            );
-
-                            if (tRes.rowLength) {
-                                const type = tRes.rows[0].type;
-
-                                // For now, only auto-finish non-single_elim.
-                                // single_elim still uses your /completeRound endpoint for champion.
-                                if (type && type !== 'single_elim') {
-                                    const lbRes = await cassandra.execute(
-                                        `
-                            SELECT player_id, points
-                            FROM leaderboard_by_player
-                            WHERE tournament_id = ?
-                            `,
-                                        [tournamentId],
-                                        { prepare: true }
-                                    );
-
-                                    if (lbRes.rowLength) {
-                                        let bestPts = -Infinity;
-                                        let leaderIds = [];
-
-                                        for (const row of lbRes.rows) {
-                                            const pts = row.points;
-                                            if (pts > bestPts) {
-                                                bestPts = pts;
-                                                leaderIds = [row.player_id];
-                                            } else if (pts === bestPts) {
-                                                leaderIds.push(row.player_id);
-                                            }
-                                        }
-
-                                        if (leaderIds.length === 1) {
-                                            const championId = leaderIds[0];
-                                            await cassandra.execute(
-                                                `
-                                    UPDATE tournaments
-                                    SET status = ?, winner_id = ?
-                                    WHERE tournament_id = ?
-                                    `,
-                                                ['finished', championId, tournamentId],
-                                                { prepare: true }
-                                            );
-                                            console.log(
-                                                `[INFO] Tournament ${tournamentId} auto-finished. Winner=${championId}, points=${bestPts}`
-                                            );
-                                        } else {
-                                            console.log(
-                                                `[INFO] Tournament ${tournamentId} top score is shared (${bestPts} pts by ${leaderIds.length} players). Not auto-finishing.`
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } catch (autoErr) {
-                        console.error('[ERROR] auto-finalization after game_over failed:', autoErr);
-                    }
-
-                    // 🔔 broadcast official result to both clients
-                    wss.clients.forEach((client) => {
-                        if (client.readyState === 1 && client.gameId === gameIdFromWs) {
-                            client.send(JSON.stringify({
-                                type: 'game_result',
-                                gameId: gameIdFromWs,
-                                result,        // "1-0" | "0-1" | "1/2-1/2"
-                                reason,        // "checkmate" | "draw"
-                                finalFen: endFen || null
-                            }));
-                        }
+                    await handleGameOver({
+                        gameId,
+                        result,
+                        reason,
+                        finalFen: endFen,
+                        endTime: new Date(),
+                        wss,
+                        redis,
+                        cassandra
                     });
                 } catch (e) {
-                    console.error('[ERROR] game_over DB update failed:', e);
+                    console.error('[ERROR] handleGameOver failed:', e);
+                } finally {
+                    stopGameTicker(gameId);
                 }
-
-                return; // we've handled this message
+                return;
             }
 
         } catch (err) {
             console.error(`[ERROR] ${err.message}`);
         }
-
-
     });
 
-    // on disconnect, we might want to clean up or notify other players
     ws.on('close', () => {
         console.log(`[INFO] WebSocket disconnected: gameId=${gameId}, color=${color}`);
-        // TODO: handle cleanup or notifications
     });
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok' });
-});
+// Health
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.get('/api/games/:gameId/moves', async (req, res) => {
-    const { gameId } = req.params;
-    const streamKey = `game:${gameId}`;
-
-    try {
-        // Oldest -> newest
-        const entries = await redis.xRange(streamKey, '-', '+', { COUNT: 2000 }) || [];
-        console.log(`[DEBUG] Total stream entries retrieved: ${entries.length}`);
-        console.log('[DEBUG] Sample entries:', JSON.stringify(entries.slice(0, 5)));
-
-        const sanMoves = [];
-
-        // redis v4 style: [{ id, message: { field: value, ... } }, ...]
-        for (const entry of entries) {
-            if (!entry) continue;
-
-            const { id, message } = entry;
-            if (!message) {
-                console.log(`[DEBUG] Skipping entry with no message. id=${id}`);
-                continue;
-            }
-
-            // Normalize message -> plain object with strings
-            const obj = {};
-            for (const [k, v] of Object.entries(message)) {
-                obj[k] = v && v.toString ? v.toString() : v;
-            }
-
-            if (obj.type === 'move' && obj.move) {
-                try {
-                    const mv = JSON.parse(obj.move);
-                    if (mv && mv.san) {
-                        sanMoves.push(mv.san);
-                    }
-                } catch (e) {
-                    console.warn('[moves API] failed to parse move JSON for', id, e);
-                }
-            }
-        }
-
-        console.log(`[DEBUG] Total SAN moves extracted: ${sanMoves.length}`);
-
-        // Group into { moveNumber, white, black }
-        const moves = [];
-        for (let i = 0; i < sanMoves.length; i += 2) {
-            moves.push({
-                moveNumber: i / 2 + 1,
-                white: sanMoves[i] || "",
-                black: sanMoves[i + 1] || ""
-            });
-        }
-
-        res.json({ gameId, moves });
-    } catch (err) {
-        console.error('[ERROR] /api/games/:gameId/moves', err);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-
-
-
-// Debug endpoint to get Redis stream entries directly
+// Debug stream
 app.get('/debug/stream/:gameId', async (req, res) => {
     const { gameId } = req.params;
     const streamKey = `game:${gameId}`;
-
     try {
         const entries = await redis.xRevRange(streamKey, '+', '-', { COUNT: 10 });
         const result = entries.map(([id, fields]) => {
             const obj = {};
-            for (let i = 0; i < fields.length; i += 2) {
-                obj[fields[i]] = fields[i + 1];
-            }
+            for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
             return { id, ...obj };
         });
-
         res.json(result);
     } catch (err) {
         console.error(`[ERROR] ${err.message}`);
@@ -638,30 +475,48 @@ app.get('/debug/stream/:gameId', async (req, res) => {
     }
 });
 
-// Add helper to read previous FENs from recent list (fast O(1) access)
+// ===================== HELPERS =====================
+
 async function getFenFromRecentList(streamKey, plies = 1) {
     const listKey = `${streamKey}:fens`;
-    // -1 = latest, -2 = previous, so index = -1 - plies
     const idx = -1 - plies;
+
     try {
         const fen = await redis.lIndex(listKey, idx);
         if (fen) return fen;
-    } catch (e) {
-        // some redis clients may not support lIndex in older APIs; fall through to snapshot fallback
-    }
-    // fallback to snapshot key
+    } catch (_) { }
+
     const snapshot = await redis.get(`${streamKey}:fen`);
     if (snapshot) return snapshot;
-    // final fallback to scanning stream history (existing function)
+
     return await computeFenFromStreamHistory(streamKey, plies);
 }
 
-// Compute an undo FEN without chess logic: find persisted FENs in the stream history.
-// We assume move/reset/undo entries include a `fen` field when they were written (client or server persisted).
-// plies = 1 => return the fen one step before the latest persisted fen.
+async function getSanMovesFromRedisStream(redis, gameId, max = 5000) {
+    const streamKey = `game:${gameId}`;
+    const entries = (await redis.xRange(streamKey, "-", "+", { COUNT: max })) || [];
+    const sanMoves = [];
+
+    for (const entry of entries) {
+        if (!entry || !entry.message) continue;
+        const msg = entry.message;
+        const type = msg.type?.toString?.() || msg.type;
+        if (type !== "move") continue;
+
+        const moveRaw = msg.move?.toString?.() || msg.move;
+        if (!moveRaw) continue;
+
+        try {
+            const mv = JSON.parse(moveRaw);
+            if (mv?.san) sanMoves.push(mv.san);
+        } catch (_) { }
+    }
+
+    return sanMoves;
+}
+
 async function computeFenFromStreamHistory(streamKey, plies = 1) {
     const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
-    // read recent entries in reverse (newest first). COUNT limits work to keep it fast.
     const COUNT = 1000;
     const entries = await redis.xRevRange(streamKey, '+', '-', { COUNT });
 
@@ -669,33 +524,443 @@ async function computeFenFromStreamHistory(streamKey, plies = 1) {
     let lastAdded = null;
 
     for (const [id, fields] of entries) {
-        // build fresh obj per entry (do NOT reuse)
         const obj = {};
-        for (let i = 0; i < fields.length; i += 2) {
-            obj[fields[i]] = fields[i + 1];
-        }
+        for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
 
         const type = (obj.type || '').toString();
-        // only accept FENs produced by relevant event types
         if (!['move', 'reset', 'undo'].includes(type)) continue;
 
         const fen = obj.fen && obj.fen.toString ? obj.fen.toString() : obj.fen;
         if (!fen) continue;
-
-        // avoid pushing duplicate consecutive FENs (can happen after optimistic writes)
         if (fen === lastAdded) continue;
 
         fens.push(fen);
         lastAdded = fen;
     }
 
-    // fens[0] is current latest persisted fen; we want the fen plies steps before it
     if (fens.length === 0) return START_FEN;
+    if (plies >= fens.length) return fens[fens.length - 1] || START_FEN;
+    return fens[plies];
+}
 
-    if (plies >= fens.length) {
-        // not enough preserved history — return the oldest one we have in window
-        return fens[fens.length - 1] || START_FEN;
+// ===================== CLOCK =====================
+
+function parseTimeControl(tc) {
+    const s = (tc || "5+0").toString().trim();
+    const m = s.match(/^(\d+)\s*\+\s*(\d+)$/);
+    const baseMin = m ? parseInt(m[1], 10) : 5;
+    const incSec = m ? parseInt(m[2], 10) : 0;
+    return { baseMs: baseMin * 60_000, incMs: incSec * 1000, tc: `${baseMin}+${incSec}` };
+}
+
+async function getOrInitClock(redis, cassandra, gameId) {
+    const clockKey = `game:${gameId}:clock`;
+    const existing = await redis.hGetAll(clockKey);
+
+    if (existing && Object.keys(existing).length > 0) {
+        return {
+            w_ms: parseInt(existing.w_ms || "0", 10),
+            b_ms: parseInt(existing.b_ms || "0", 10),
+            active: existing.active || "w",
+            running: existing.running === "1",
+            last_tick: parseInt(existing.last_tick || "0", 10),
+            inc_ms: parseInt(existing.inc_ms || "0", 10),
+            tc: existing.tc || null
+        };
     }
 
-    return fens[plies];
+    let timeControl = "5+0";
+    try {
+        const mRes = await cassandra.execute(
+            `SELECT tournament_id FROM matches_by_game WHERE game_id = ?`,
+            [gameId],
+            { prepare: true }
+        );
+        if (mRes.rowLength) {
+            const tid = mRes.rows[0].tournament_id;
+            if (tid) {
+                const tRes = await cassandra.execute(
+                    `SELECT time_control FROM tournaments WHERE tournament_id = ?`,
+                    [tid],
+                    { prepare: true }
+                );
+                if (tRes.rowLength && tRes.rows[0].time_control) {
+                    timeControl = tRes.rows[0].time_control;
+                }
+            }
+        }
+    } catch (_) { }
+
+    const { baseMs, incMs, tc } = parseTimeControl(timeControl);
+
+    const init = {
+        w_ms: baseMs,
+        b_ms: baseMs,
+        active: "w",
+        running: false,
+        last_tick: 0,
+        inc_ms: incMs,
+        tc
+    };
+
+    await redis.hSet(clockKey, {
+        w_ms: String(init.w_ms),
+        b_ms: String(init.b_ms),
+        active: init.active,
+        running: "0",
+        last_tick: "0",
+        inc_ms: String(init.inc_ms),
+        tc: init.tc
+    });
+
+    return init;
+}
+
+async function saveClock(redis, gameId, clock) {
+    const clockKey = `game:${gameId}:clock`;
+    await redis.hSet(clockKey, {
+        w_ms: String(clock.w_ms),
+        b_ms: String(clock.b_ms),
+        active: clock.active,
+        running: clock.running ? "1" : "0",
+        last_tick: String(clock.last_tick || 0),
+        inc_ms: String(clock.inc_ms || 0),
+        tc: clock.tc || ""
+    });
+}
+
+function broadcastClock(wss, gameId, clock) {
+    const payload = JSON.stringify({
+        type: "clock_state",
+        gameId,
+        whiteMs: clock.w_ms,
+        blackMs: clock.b_ms,
+        active: clock.active,
+        running: clock.running,
+        incMs: clock.inc_ms,
+        timeControl: clock.tc || null,
+        serverNow: Date.now()
+    });
+
+    wss.clients.forEach((client) => {
+        if (client.readyState === 1 && client.gameId === gameId) {
+            client.send(payload);
+        }
+    });
+}
+
+function settleClock(clock, nowMs) {
+    if (!clock.running || !clock.last_tick) return { flag: false };
+
+    const elapsed = Math.max(0, nowMs - clock.last_tick);
+
+    if (clock.active === "w") {
+        clock.w_ms -= elapsed;
+        if (clock.w_ms <= 0) { clock.w_ms = 0; return { flag: true, loser: "w" }; }
+    } else {
+        clock.b_ms -= elapsed;
+        if (clock.b_ms <= 0) { clock.b_ms = 0; return { flag: true, loser: "b" }; }
+    }
+
+    clock.last_tick = nowMs;
+    return { flag: false };
+}
+
+// ===================== GAME OVER PIPELINE =====================
+
+async function handleGameOver({
+    gameId,
+    result,
+    reason,
+    finalFen,
+    endTime = new Date(),
+    loser = null,
+    winner = null,
+    wss,
+    redis,
+    cassandra
+}) {
+    const streamKey = `game:${gameId}`;
+
+    // ✅ idempotency guard: if already finished, do nothing (prevents double DB writes)
+    const prev = await redis.hGetAll(`${streamKey}:meta`);
+    if (prev && prev.finished === "1" && prev.result) {
+        return;
+    }
+
+    console.log(`[INFO] handleGameOver game=${gameId}: result=${result}, reason=${reason}`);
+
+    // mark finished in Redis first (idempotent)
+    await redis.hSet(`${streamKey}:meta`, {
+        finished: '1',
+        result: result || '',
+        reason: reason || '',
+        finalFen: finalFen || '',
+        loser: loser || '',
+        winner: winner || ''
+    });
+
+    // stop ticking now that game ended
+    stopGameTicker(gameId);
+
+    // broadcast result
+    wss.clients.forEach((client) => {
+        if (client.readyState === 1 && client.gameId === gameId) {
+            client.send(JSON.stringify({
+                type: 'game_result',
+                gameId,
+                result,
+                reason,
+                loser: loser || null,
+                winner: winner || null,
+                finalFen: finalFen || null
+            }));
+        }
+    });
+
+    // If result missing, don’t write DB
+    if (!result) {
+        console.warn(`[WARN] handleGameOver: missing result for game=${gameId}, skipping DB writes`);
+        return;
+    }
+
+    // 1) Look up match
+    const matchRes = await cassandra.execute(
+        `
+      SELECT tournament_id, round, board_number, white_player, black_player
+      FROM matches_by_game
+      WHERE game_id = ?
+    `,
+        [gameId],
+        { prepare: true }
+    );
+
+    if (!matchRes.rowLength) {
+        console.warn(`[WARN] handleGameOver: no match found in matches_by_game for game_id=${gameId}`);
+        return;
+    }
+
+    const row = matchRes.rows[0];
+    const tournamentId = row.tournament_id;
+    const round = row.round;
+    const boardNumber = row.board_number;
+    const whiteId = row.white_player;
+    const blackId = row.black_player;
+
+    // scoring
+    let whiteDelta = 0;
+    let blackDelta = 0;
+
+    if (result === '1-0') { whiteDelta = 1.0; blackDelta = 0.0; }
+    else if (result === '0-1') { whiteDelta = 0.0; blackDelta = 1.0; }
+    else if (result === '1/2-1/2') { whiteDelta = 0.5; blackDelta = 0.5; }
+    else console.warn(`[WARN] handleGameOver: unknown result="${result}" – skipping leaderboard update`);
+
+    // Update leaderboard (draw also allowed)
+    if (result === '1/2-1/2' || whiteDelta > 0 || blackDelta > 0) {
+        const whiteLB = await cassandra.execute(
+            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
+            [tournamentId, whiteId],
+            { prepare: true }
+        );
+        const whiteCurrent = whiteLB.rowLength ? whiteLB.rows[0].points : 0.0;
+        const whiteNew = whiteCurrent + whiteDelta;
+
+        await cassandra.execute(
+            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
+            [tournamentId, whiteId, whiteNew],
+            { prepare: true }
+        );
+
+        const blackLB = await cassandra.execute(
+            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
+            [tournamentId, blackId],
+            { prepare: true }
+        );
+        const blackCurrent = blackLB.rowLength ? blackLB.rows[0].points : 0.0;
+        const blackNew = blackCurrent + blackDelta;
+
+        await cassandra.execute(
+            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
+            [tournamentId, blackId, blackNew],
+            { prepare: true }
+        );
+
+        console.log(`[INFO] Updated leaderboard: white=${whiteId} -> ${whiteNew}, black=${blackId} -> ${blackNew}`);
+    }
+
+    // 2) Update matches
+    await cassandra.execute(
+        `
+      UPDATE matches
+      SET result = ?, end_time = ?, final_fen = ?
+      WHERE tournament_id = ? AND round = ? AND board_number = ?
+    `,
+        [result, endTime, finalFen, tournamentId, round, boardNumber],
+        { prepare: true }
+    );
+
+    // 3) Update matches_by_game
+    await cassandra.execute(
+        `
+      UPDATE matches_by_game
+      SET result = ?, end_time = ?
+      WHERE game_id = ?
+    `,
+        [result, endTime, gameId],
+        { prepare: true }
+    );
+
+    // 3.5) Archive (idempotent)
+    try {
+        const checkRes = await cassandra.execute(
+            'SELECT game_id FROM game_archive_by_id WHERE game_id = ?',
+            [gameId],
+            { prepare: true }
+        );
+
+        if (!checkRes.rowLength) {
+            const sanMoves = await getSanMovesFromRedisStream(redis, gameId);
+
+            let startedAt = null;
+            try {
+                const startedRes = await cassandra.execute(
+                    `
+            SELECT start_time
+            FROM matches
+            WHERE tournament_id = ? AND round = ? AND board_number = ?
+          `,
+                    [tournamentId, round, boardNumber],
+                    { prepare: true }
+                );
+                if (startedRes.rowLength) startedAt = startedRes.rows[0].start_time;
+            } catch (e) {
+                console.warn('[archive] could not fetch start_time, using null', e);
+            }
+
+            const createdAt = new Date();
+
+            let timeControl = null;
+            try {
+                const tInfo = await cassandra.execute(
+                    "SELECT time_control FROM tournaments WHERE tournament_id = ?",
+                    [tournamentId],
+                    { prepare: true }
+                );
+                if (tInfo.rowLength) timeControl = tInfo.rows[0].time_control || null;
+            } catch (_) { }
+
+            await cassandra.execute(
+                `
+          INSERT INTO game_archive_by_id (
+            game_id, tournament_id, round, board_number,
+            white_player, black_player,
+            result, reason,
+            start_time, end_time,
+            final_fen, time_control,
+            san_moves, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+                [
+                    gameId,
+                    tournamentId,
+                    round,
+                    boardNumber,
+                    whiteId,
+                    blackId,
+                    result || "",
+                    reason || "",
+                    startedAt,
+                    endTime,
+                    finalFen || "",
+                    timeControl,
+                    sanMoves,
+                    createdAt
+                ],
+                { prepare: true }
+            );
+
+            console.log(`[INFO] Archived game ${gameId} with ${sanMoves.length} moves`);
+        }
+    } catch (archiveErr) {
+        console.error('[ERROR] archiving game failed:', archiveErr);
+    }
+
+    // 4) Auto-mark round finished if all games have result
+    try {
+        const rRes = await cassandra.execute(
+            `
+        SELECT board_number, result
+        FROM matches
+        WHERE tournament_id = ? AND round = ?
+      `,
+            [tournamentId, round],
+            { prepare: true }
+        );
+
+        const unfinished = rRes.rows.filter(r => !r.result);
+        if (unfinished.length === 0) {
+            const nowRound = new Date();
+            await cassandra.execute(
+                `
+          UPDATE rounds_by_tournament
+          SET finished_at = ?
+          WHERE tournament_id = ? AND round = ?
+        `,
+                [nowRound, tournamentId, round],
+                { prepare: true }
+            );
+
+            console.log(`[INFO] Auto-marked round ${round} finished for tournament ${tournamentId}`);
+
+            // Optional auto-finish non-single-elim tournaments
+            const tRes = await cassandra.execute(
+                'SELECT type FROM tournaments WHERE tournament_id = ?',
+                [tournamentId],
+                { prepare: true }
+            );
+
+            if (tRes.rowLength) {
+                const type = tRes.rows[0].type;
+                if (type && type !== 'single_elim') {
+                    const lbRes = await cassandra.execute(
+                        `
+              SELECT player_id, points
+              FROM leaderboard_by_player
+              WHERE tournament_id = ?
+            `,
+                        [tournamentId],
+                        { prepare: true }
+                    );
+
+                    if (lbRes.rowLength) {
+                        let bestPts = -Infinity;
+                        let leaderIds = [];
+
+                        for (const r of lbRes.rows) {
+                            const pts = r.points;
+                            if (pts > bestPts) { bestPts = pts; leaderIds = [r.player_id]; }
+                            else if (pts === bestPts) leaderIds.push(r.player_id);
+                        }
+
+                        if (leaderIds.length === 1) {
+                            const championId = leaderIds[0];
+                            await cassandra.execute(
+                                `
+                  UPDATE tournaments
+                  SET status = ?, winner_id = ?
+                  WHERE tournament_id = ?
+                `,
+                                ['finished', championId, tournamentId],
+                                { prepare: true }
+                            );
+                            console.log(`[INFO] Tournament ${tournamentId} auto-finished. Winner=${championId}`);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (autoErr) {
+        console.error('[ERROR] auto-finalization failed:', autoErr);
+    }
 }

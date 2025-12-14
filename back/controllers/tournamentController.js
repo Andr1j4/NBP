@@ -991,6 +991,24 @@ async function getRoundMatches(req, res) {
     }
 }
 
+async function getSanMovesFromStream(redis, gameId) {
+    const streamKey = `game:${gameId}`;
+    const entries = await redis.xRange(streamKey, '-', '+', { COUNT: 5000 });
+
+    const san = [];
+    for (const [id, fields] of entries) {
+        const obj = {};
+        for (let i = 0; i < fields.length; i += 2) obj[fields[i]] = fields[i + 1];
+
+        if (obj.type === 'move' && obj.move) {
+            try {
+                const mv = JSON.parse(obj.move);
+                if (mv?.san) san.push(mv.san);
+            } catch { }
+        }
+    }
+    return san;
+}
 
 
 
@@ -1005,5 +1023,6 @@ module.exports = {
     listTournaments,
     getTournamentInfo,
     listRounds,
-    getRoundMatches
+    getRoundMatches,
+    getSanMovesFromStream
 };
