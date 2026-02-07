@@ -1,9 +1,8 @@
-// LOCAL_PLAY.jsx
+// REDIS_CHESS.jsx
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { useEffect, useRef, useState } from "react";
-
-const WS_BASE = "ws://10.121.107.106:8080";
+import { API_BASE, WS_BASE } from "./config";
 
 /**
  * NOTE:
@@ -34,7 +33,7 @@ function normalizeColor(c) {
     return c === "w" || c === "b" ? c : "spectator";
 }
 
-export default function LOCAL_PLAY() {
+export default function REDIS_CHESS() {
     // ===================== GAME STATE =====================
     const [game, setGame] = useState(() => new Chess());
     const [gamePosition, setGamePosition] = useState(() => game.fen());

@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
+import { API_BASE } from "./config";
 
 export default function ReplayBoard({ gameId }) {
-    const API_BASE = "http://10.121.107.106:8080";
-
     const [loading, setLoading] = useState(false);
     const [err, setErr] = useState("");
 

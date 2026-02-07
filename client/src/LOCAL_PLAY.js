@@ -1,105 +1,75 @@
-import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { useState, useEffect } from "react";
+import { useChessGame } from "./hooks/useChessGame";
+import { useWebSocket } from "./hooks/useWebSocket";
 
 export default function LOCAL_PLAY() {
-    const [game, setGame] = useState(new Chess());
-    const [gamePosition, setGamePosition] = useState(game.fen());
-    const [ws, setWs] = useState(null);
-    const [playerColor, setPlayerColor] = useState("w");
-
-    // Parse game_id and color from URL
     const query = new URLSearchParams(window.location.search);
     const gameId = query.get("game_id");
     const colorFromURL = query.get("color");
 
+    const { game, gamePosition, makeMove, undo, reset, isGameOver, isDraw } = useChessGame();
+    const [playerColor, setPlayerColor] = useState("w");
+
+    // ✅ FIX: Use proper hook for WS
+    const { send: wsSend } = useWebSocket(
+        `/${gameId}/${colorFromURL}`,
+        (data) => handleWsMessage(data),
+        !!gameId && !!colorFromURL
+    );
+
+    // Parse game_id and color from URL
     useEffect(() => {
         if (!gameId || !["w", "b"].includes(colorFromURL)) {
             console.error("Missing or invalid game_id/color in URL");
             return;
         }
 
-        const socket = new WebSocket(`ws://10.121.107.106:8080/${gameId}/${colorFromURL}`);
-
-        socket.onopen = () => {
-            console.log("WebSocket connection established");
-        };
-
-        socket.onmessage = (message) => {
-            const data = JSON.parse(message.data);
-            console.log("Received message:", data);
-
-            if (data.type === "move") {
-                const move = game.move(data.move);
-                if (move === null) return false;
-
-                setGamePosition(game.fen());
-
-                if (g.isGameOver() || g.isDraw()) {
-                    let result = null;
-                    let reason = null;
-
-                    if (g.isCheckmate()) {
-                        result = (playerColor === 'w') ? '1-0' : '0-1';
-                        reason = 'checkmate';
-                    } else if (g.isDraw()) {
-                        result = '1/2-1/2';
-                        reason = 'draw'; // later you can refine: stalemate, repetition, etc.
-                    }
-
-                    if (ws && ws.readyState === WebSocket.OPEN && result) {
-                        ws.send(JSON.stringify({
-                            type: 'game_over',
-                            gameId,      // from query
-                            result,      // "1-0", "0-1", "1/2-1/2"
-                            reason,      // 'checkmate' | 'draw' | etc.
-                            fen: g.fen() // final FEN (optional but nice to store)
-                        }));
-                    }
-
-                    alert("Game over");
-                }
-
-
-                return true;
-            } else if (data.type === "reset") {
-                game.reset();
-                setGamePosition(game.fen());
-            } else if (data.type === "undo") {
-                game.undo();
-                setGamePosition(game.fen());
-            }
-            console.log("Game after message:", game);
-        };
-
-        setWs(socket);
         setPlayerColor(colorFromURL);
 
         return () => {
-            socket.close();
+            // Cleanup not needed for WS, handled by useWebSocket hook
         };
     }, [gameId, colorFromURL]);
 
 
-    function undoMove() {
-        game.undo();
-        setGamePosition(game.fen());
-        console.log("ws status:", ws ? ws : "No WebSocket");
-        if (ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: "undo" }));
-        }
-        console.log("Game after undo:", game);
-    }
+    function handleWsMessage(data) {
+        if (data.type === "move") {
+            const move = makeMove(data.move);
+            if (move === null) return false;
 
-    function resetGame() {
-        game.reset();
-        setGamePosition(game.fen());
-        console.log("ws status:", ws ? ws : "No WebSocket");
+            // ✅ FIX: Use game reference, not undefined 'g'
+            if (isGameOver() || isDraw()) {
+                let result = null;
+                let reason = null;
 
-        if (ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: "reset" }));
+                if (isGameOver()) {
+                    result = (playerColor === 'w') ? '1-0' : '0-1';
+                    reason = 'checkmate';
+                } else if (isDraw()) {
+                    result = '1/2-1/2';
+                    reason = 'draw'; // later you can refine: stalemate, repetition, etc.
+                }
+
+                alert("Game over");
+
+                // Optionally, send game over result to server
+                if (wsSend && result) {
+                    wsSend({
+                        type: 'game_over',
+                        gameId,      // from query
+                        result,      // "1-0", "0-1", "1/2-1/2"
+                        reason,      // 'checkmate' | 'draw' | etc.
+                        fen: game.fen() // final FEN (optional but nice to store)
+                    });
+                }
+            }
+            return true;
+        } else if (data.type === "reset") {
+            reset();
+        } else if (data.type === "undo") {
+            undo();
         }
-        console.log("Game after reset:", game);
     }
 
     function onDrop(sourceSquare, targetSquare, piece) {
@@ -109,25 +79,16 @@ export default function LOCAL_PLAY() {
         }
 
         try {
-            const move = game.move({
+            const move = makeMove({
                 from: sourceSquare,
                 to: targetSquare,
                 promotion: piece[1].toLowerCase() ?? "q"
             });
 
-            if (move === null) return false;
+            if (!move) return false;
 
-            setGamePosition(game.fen());
-
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: "move",
-                    move: move
-                }));
-            }
-
-            if (game.isGameOver() || game.isDraw()) {
-                alert("Game over");
+            if (wsSend) {
+                wsSend({ type: "move", move });
             }
 
             return true;
@@ -137,20 +98,24 @@ export default function LOCAL_PLAY() {
         }
     }
 
+    function undoMove() {
+        undo();
+        if (wsSend) wsSend({ type: "undo" });
+    }
+
+    function resetGame() {
+        reset();
+        if (wsSend) wsSend({ type: "reset" });
+    }
+
     return (
         <div>
             <h2>Game ID: {gameId}</h2>
-            <h3>You are playing as: {playerColor === "w" ? "White" : "Black"}</h3>
+            <h3>You are: {playerColor === "w" ? "White" : "Black"}</h3>
             <Chessboard
                 boardWidth={400}
-                customNotationStyle={{ color: "#000", fontWeight: "bold" }}
-                animationDuration={200}
                 position={gamePosition}
                 onPieceDrop={onDrop}
-                customBoardStyle={{
-                    borderRadius: "4px",
-                    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.5)"
-                }}
                 boardOrientation={playerColor === "w" ? "white" : "black"}
             />
             <button onClick={resetGame}>Reset</button>

@@ -1,24 +1,20 @@
 // server/routes/authRoutes.js
 const express = require("express");
 const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
 const { v4: uuidv4 } = require("uuid");
 const { authRequired } = require("../middleware/auth");
+const { signJwt } = require("../utils/token");
 const cassandra = require("../db/cassandra");
 
 const router = express.Router();
 
-function signToken(user) {
-    const payload = {
+function buildUserPayload(user) {
+    return {
         user_id: user.user_id,
         email: user.email,
         role: user.role || "user",
         player_id: user.player_id || null,
     };
-
-    return jwt.sign(payload, process.env.JWT_SECRET, {
-        expiresIn: process.env.JWT_EXPIRES_IN || "12h",
-    });
 }
 
 /**
@@ -38,17 +34,20 @@ router.post("/register", async (req, res) => {
         const password = String(req.body.password || "");
         const role = "user";
 
-        // NEW: allow linking to an existing player
-        const playerId = req.body.player_id ? String(req.body.player_id).trim() : null;
+        console.log('[AUTH_REGISTER] Starting registration', {
+            email,
+            timestamp: new Date().toISOString(),
+        });
 
-        // NEW: allow creating player fields if player_id not provided
-        const firstName = String(req.body.first_name || "").trim();
-        const lastName = String(req.body.last_name || "").trim();
-        const country = String(req.body.country || "").trim();
-        const rating = Number.isFinite(+req.body.rating) ? parseInt(req.body.rating, 10) : 1500;
+        if (!email || !password) {
+            console.warn('[AUTH_REGISTER] Missing credentials', { email });
+            return res.status(400).json({ error: "missing_email_or_password" });
+        }
 
-        if (!email || !password) return res.status(400).json({ error: "missing_email_or_password" });
-        if (password.length < 6) return res.status(400).json({ error: "password_too_short" });
+        if (password.length < 6) {
+            console.warn('[AUTH_REGISTER] Password too short', { email });
+            return res.status(400).json({ error: "password_too_short" });
+        }
 
         // already exists?
         const existing = await cassandra.execute(
@@ -56,10 +55,15 @@ router.post("/register", async (req, res) => {
             [email],
             { prepare: true }
         );
-        if (existing.rowLength) return res.status(409).json({ error: "email_already_registered" });
+        if (existing.rowLength) {
+            console.warn('[AUTH_REGISTER] Email already registered', { email });
+            return res.status(409).json({ error: "email_already_registered" });
+        }
 
         const userId = uuidv4();
         const createdAt = new Date();
+
+        console.log('[AUTH_REGISTER] User validation passed', { email, userId });
 
         // if player_id provided: validate it exists
         let finalPlayerId = playerId;
@@ -115,10 +119,17 @@ router.post("/register", async (req, res) => {
             display_name: displayName,
         };
 
-        const token = signToken(user);
+        const token = signJwt(buildUserPayload(user), "12h");
+        console.log('[AUTH_REGISTER] SUCCESS', { email, userId });
+
         return res.json({ token, user });
     } catch (e) {
-        console.error("[auth/register] error:", e);
+        console.error("[auth/register] ERROR", {
+            error: e.message,
+            email: req.body.email,
+            stack: e.stack,
+            timestamp: new Date().toISOString(),
+        });
         return res.status(500).json({ error: "server_error" });
     }
 });
@@ -132,18 +143,34 @@ router.post("/login", async (req, res) => {
         const email = String(req.body.email || "").trim().toLowerCase();
         const password = String(req.body.password || "");
 
-        if (!email || !password) return res.status(400).json({ error: "missing_email_or_password" });
+        console.log('[AUTH_LOGIN] Login attempt', {
+            email,
+            timestamp: new Date().toISOString(),
+        });
+
+        if (!email || !password) {
+            console.warn('[AUTH_LOGIN] Missing credentials');
+            return res.status(400).json({ error: "missing_email_or_password" });
+        }
 
         const u = await cassandra.execute(
             "SELECT user_id, password_hash, role FROM users_by_email WHERE email = ?",
             [email],
             { prepare: true }
         );
-        if (!u.rowLength) return res.status(401).json({ error: "invalid_credentials" });
+
+        if (!u.rowLength) {
+            console.warn('[AUTH_LOGIN] User not found', { email });
+            return res.status(401).json({ error: "invalid_credentials" });
+        }
 
         const row = u.rows[0];
         const ok = await bcrypt.compare(password, row.password_hash);
-        if (!ok) return res.status(401).json({ error: "invalid_credentials" });
+
+        if (!ok) {
+            console.warn('[AUTH_LOGIN] Invalid password', { email });
+            return res.status(401).json({ error: "invalid_credentials" });
+        }
 
         // load extra profile
         const prof = await cassandra.execute(
@@ -163,11 +190,17 @@ router.post("/login", async (req, res) => {
             display_name: displayName,
         };
 
-        const token = signToken(user);
+        const token = signJwt(buildUserPayload(user), "12h");
+
+        console.log('[AUTH_LOGIN] SUCCESS', { email, userId: user.user_id });
 
         return res.json({ token, user });
     } catch (e) {
-        console.error("[auth/login] error:", e);
+        console.error("[auth/login] ERROR", {
+            error: e.message,
+            email: req.body.email,
+            stack: e.stack,
+        });
         return res.status(500).json({ error: "server_error" });
     }
 });

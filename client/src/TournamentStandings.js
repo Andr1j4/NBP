@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { API_BASE } from "./config";
 
 export default function TournamentStandings() {
     const [tournamentId, setTournamentId] = useState("");
@@ -15,8 +16,7 @@ export default function TournamentStandings() {
         setLoading(true);
 
         try {
-            // if you have CRA proxy set up to 8080, `/api/...` is enough
-            const res = await fetch(`http://10.121.107.106:8080/api/tournaments/${tournamentId}/standings`);
+            const res = await fetch(`${API_BASE}/api/tournaments/${tournamentId}/standings`);
 
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);

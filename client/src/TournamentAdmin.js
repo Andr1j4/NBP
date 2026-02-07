@@ -1,39 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { API_BASE, STORAGE_KEYS, DEFAULT_PLAYERS } from "./config";
 
-const API_BASE = "http://10.121.107.106:8080";
-
-const ADMIN_TOKEN_KEY = "turnir_admin_authToken";
-const ADMIN_ME_KEY = "turnir_admin_me";
-
-// Your 4 players (default bootstrap)
-const DEFAULT_PLAYERS = [
-    "0e087985-98a7-48dd-b3db-7d7f9da87520",
-    "1f6fa85d-9c47-4d7f-b33f-81f172a8c82a",
-    "c1bb8a8d-06f5-42bd-af1a-0b619bce08c4",
-    "f8017097-2cf4-4817-bef4-1b109e8ef880",
-];
-
-function getToken() {
-    return localStorage.getItem(ADMIN_TOKEN_KEY) || "";
-}
-
-function setToken(token) {
-    if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
-    else localStorage.removeItem(ADMIN_TOKEN_KEY);
-}
-
-function setMe(user) {
-    if (user) localStorage.setItem(ADMIN_ME_KEY, JSON.stringify(user));
-    else localStorage.removeItem(ADMIN_ME_KEY);
-}
-
-function getMe() {
-    try {
-        return JSON.parse(localStorage.getItem(ADMIN_ME_KEY) || "null");
-    } catch {
-        return null;
-    }
-}
+const ADMIN_TOKEN_KEY = STORAGE_KEYS.ADMIN_TOKEN;
+const ADMIN_ME_KEY = STORAGE_KEYS.ADMIN_ME;
 
 // Accept both snake_case and camelCase from backend
 function normalizeMatch(m) {
@@ -60,6 +29,13 @@ async function authFetch(url, options = {}) {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
     };
 
+    console.log('[AUTH_FETCH] Making request', {
+        method: options.method || 'GET',
+        url,
+        hasToken: !!token,
+        timestamp: new Date().toISOString(),
+    });
+
     const res = await fetch(url, { ...options, headers });
 
     let data = null;
@@ -69,7 +45,36 @@ async function authFetch(url, options = {}) {
         data = null;
     }
 
+    console.log('[AUTH_FETCH] Response received', {
+        url,
+        status: res.status,
+        ok: res.ok,
+        hasData: !!data,
+    });
+
     return { res, data };
+}
+
+function getToken() {
+    return localStorage.getItem(ADMIN_TOKEN_KEY) || "";
+}
+
+function setToken(token) {
+    if (token) localStorage.setItem(ADMIN_TOKEN_KEY, token);
+    else localStorage.removeItem(ADMIN_TOKEN_KEY);
+}
+
+function setMe(user) {
+    if (user) localStorage.setItem(ADMIN_ME_KEY, JSON.stringify(user));
+    else localStorage.removeItem(ADMIN_ME_KEY);
+}
+
+function getMe() {
+    try {
+        return JSON.parse(localStorage.getItem(ADMIN_ME_KEY) || "null");
+    } catch {
+        return null;
+    }
 }
 
 export default function TournamentAdmin() {
@@ -126,6 +131,11 @@ export default function TournamentAdmin() {
     // ----------------------------
     async function login() {
         setStatus("Logging in...");
+        console.log('[LOGIN] Starting login', {
+            email: loginForm.email,
+            timestamp: new Date().toISOString(),
+        });
+
         try {
             const { res, data } = await authFetch(`${API_BASE}/api/auth/login`, {
                 method: "POST",
@@ -137,6 +147,10 @@ export default function TournamentAdmin() {
             });
 
             if (!res.ok) {
+                console.warn('[LOGIN] Login failed', {
+                    error: data?.error,
+                    status: res.status,
+                });
                 setStatus(`Login failed: ${data?.error || "login_failed"}`);
                 return;
             }
@@ -145,9 +159,14 @@ export default function TournamentAdmin() {
             setMe(data.user);
             setMeState(data.user);
 
+            console.log('[LOGIN] SUCCESS', {
+                email: data.user?.email,
+                userId: data.user?.user_id,
+            });
+
             setStatus(`Logged in as ${data.user?.email || "user"}`);
         } catch (e) {
-            console.error(e);
+            console.error('[LOGIN] ERROR', { error: e.message, stack: e.stack });
             setStatus("Login failed (network/console).");
         }
     }
@@ -177,15 +196,28 @@ export default function TournamentAdmin() {
     // Load tournaments
     // ----------------------------
     async function loadTournaments() {
+        console.log('[LOAD_TOURNAMENTS] Starting load', {
+            timestamp: new Date().toISOString(),
+        });
+
         try {
             const { res, data } = await authFetch(`${API_BASE}/api/tournaments`);
             if (!res.ok) {
+                console.warn('[LOAD_TOURNAMENTS] Failed', {
+                    error: data?.error,
+                    status: res.status,
+                });
                 setStatus(`Error loading tournaments: ${data?.error || "failed"}`);
                 return;
             }
+
+            console.log('[LOAD_TOURNAMENTS] SUCCESS', {
+                tournamentCount: data?.tournaments?.length || 0,
+            });
+
             setTournaments(data?.tournaments || []);
         } catch (e) {
-            console.error("Failed to load tournaments", e);
+            console.error('[LOAD_TOURNAMENTS] ERROR', { error: e.message });
             setStatus("Error loading tournaments (see console).");
         }
     }
@@ -204,12 +236,26 @@ export default function TournamentAdmin() {
             setSelectedRound("");
             return;
         }
+
+        console.log('[CLIENT] loadRoundsForTournament START', { tid, timestamp: new Date().toISOString() });
+
         try {
+            const startTime = Date.now();
             const { res, data } = await authFetch(`${API_BASE}/api/tournaments/${tid}/rounds`);
+
+            const elapsedMs = Date.now() - startTime;
+            console.log('[CLIENT] loadRoundsForTournament RESPONSE', {
+                tid,
+                status: res.status,
+                roundCount: data?.rounds?.length || 0,
+                elapsedMs
+            });
+
             if (!res.ok) {
                 setStatus(`Error loading rounds: ${data?.error || "failed"}`);
                 return;
             }
+
             const list = data?.rounds || [];
             setRounds(list);
 
@@ -220,7 +266,7 @@ export default function TournamentAdmin() {
                 setSelectedRound("");
             }
         } catch (e) {
-            console.error("Failed to load rounds", e);
+            console.error('[CLIENT] loadRoundsForTournament ERROR', { error: e.message });
         }
     }
 
@@ -239,6 +285,14 @@ export default function TournamentAdmin() {
     // ----------------------------
     async function createTournament() {
         setStatus("Creating tournament...");
+        console.log('[CREATE_TOURNAMENT] Starting creation', {
+            name: createForm.name,
+            location: createForm.location,
+            type: createForm.type,
+            timeControl: createForm.timeControl,
+            timestamp: new Date().toISOString(),
+        });
+
         try {
             const { res, data } = await authFetch(`${API_BASE}/api/tournaments`, {
                 method: "POST",
@@ -252,11 +306,17 @@ export default function TournamentAdmin() {
             });
 
             if (!res.ok) {
+                console.warn('[CREATE_TOURNAMENT] Failed', {
+                    error: data?.error,
+                    status: res.status,
+                });
                 setStatus(`Error: ${data?.error || "failed to create tournament"}`);
                 return;
             }
 
             const tid = data?.tournamentId || data?.id;
+            console.log('[CREATE_TOURNAMENT] SUCCESS', { tournamentId: tid });
+
             setStatus(`Tournament created: ${tid}`);
             await loadTournaments();
 
@@ -265,7 +325,7 @@ export default function TournamentAdmin() {
                 await loadRoundsForTournament(tid);
             }
         } catch (e) {
-            console.error(e);
+            console.error('[CREATE_TOURNAMENT] ERROR', { error: e.message, stack: e.stack });
             setStatus("Error: could not create tournament (check console).");
         }
     }
@@ -274,11 +334,20 @@ export default function TournamentAdmin() {
     // Register players to tournament
     // ----------------------------
     async function registerPlayers() {
+        console.log('[REGISTER_PLAYERS] Starting registration', {
+            tournamentId,
+            playerCount: playersList.length,
+            timestamp: new Date().toISOString(),
+        });
+
         if (!tournamentId) {
+            console.warn('[REGISTER_PLAYERS] No tournament selected');
             setStatus("Pick a tournament first.");
             return;
         }
+
         if (playersList.length === 0) {
+            console.warn('[REGISTER_PLAYERS] No players entered');
             setStatus("No players entered.");
             return;
         }
@@ -288,18 +357,34 @@ export default function TournamentAdmin() {
         const results = [];
         for (const pid of playersList) {
             try {
+                console.log('[REGISTER_PLAYERS] Registering player', { tournamentId, player: pid });
+
                 const { res, data } = await authFetch(`${API_BASE}/api/tournaments/${tournamentId}/register`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ player_id: pid }),
                 });
 
-                if (!res.ok) results.push(`❌ ${pid}: ${data?.error || "register_failed"}`);
-                else results.push(`✅ ${pid}`);
-            } catch {
+                if (!res.ok) {
+                    console.warn('[REGISTER_PLAYERS] Player registration failed', {
+                        player: pid,
+                        error: data?.error,
+                    });
+                    results.push(`❌ ${pid}: ${data?.error || "register_failed"}`);
+                } else {
+                    console.log('[REGISTER_PLAYERS] Player registered', { player: pid });
+                    results.push(`✅ ${pid}`);
+                }
+            } catch (e) {
+                console.error('[REGISTER_PLAYERS] Network error', { player: pid, error: e.message });
                 results.push(`❌ ${pid}: network_error`);
             }
         }
+
+        console.log('[REGISTER_PLAYERS] COMPLETED', {
+            successful: results.filter(r => r.includes('✅')).length,
+            failed: results.filter(r => r.includes('❌')).length,
+        });
 
         setStatus(`Register done:\n${results.join("\n")}`);
     }
@@ -314,15 +399,28 @@ export default function TournamentAdmin() {
     // ----------------------------
     async function startRound() {
         if (!tournamentId) return;
+
+        console.log('[CLIENT] startRound START', { tournamentId, timestamp: new Date().toISOString() });
+
         setStatus("Starting round...");
         setMatches([]);
         setPlayLinks({});
 
         try {
+            const startTime = Date.now();
             const { res, data } = await authFetch(`${API_BASE}/api/tournaments/${tournamentId}/start`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({}),
+            });
+
+            const elapsedMs = Date.now() - startTime;
+            console.log('[CLIENT] startRound RESPONSE', {
+                tournamentId,
+                status: res.status,
+                round: data?.round,
+                pairingCount: data?.pairings?.length || 0,
+                elapsedMs
             });
 
             if (!res.ok) {
@@ -330,13 +428,22 @@ export default function TournamentAdmin() {
                 return;
             }
 
-            setStatus(`Round ${data.round} started.`);
+            setStatus(`Round ${data.round} started. Waiting for data consistency...`);
+
+            // ✅ Wait malo da se data propagira
+            await new Promise(r => setTimeout(r, 800));
+
+            console.log('[CLIENT] startRound - loading rounds after delay');
             await loadRoundsForTournament(tournamentId);
+
             setSelectedRound(String(data.round));
 
+            console.log('[CLIENT] startRound - loading matches after delay');
             await loadMatchesForRound(String(data.round), { autoGeneratePlayLinks: true });
+
+            console.log('[CLIENT] startRound SUCCESS');
         } catch (err) {
-            console.error(err);
+            console.error('[CLIENT] startRound ERROR', { error: err.message, stack: err.stack });
             setStatus("Error: could not start round (check console).");
         }
     }
@@ -402,6 +509,9 @@ export default function TournamentAdmin() {
     // ----------------------------
     async function loadMatchesForRound(roundStr = selectedRound, opts = {}) {
         const round = parseInt(roundStr, 10);
+
+        console.log('[CLIENT] loadMatchesForRound START', { tournamentId, round, timestamp: new Date().toISOString() });
+
         if (!round) {
             setStatus("Please select a valid round to load matches.");
             return;
@@ -412,7 +522,18 @@ export default function TournamentAdmin() {
         setPlayLinks({});
 
         try {
+            const startTime = Date.now();
             const { res, data } = await authFetch(`${API_BASE}/api/tournaments/${tournamentId}/rounds/${round}/matches`);
+
+            const elapsedMs = Date.now() - startTime;
+            console.log('[CLIENT] loadMatchesForRound RESPONSE', {
+                tournamentId,
+                round,
+                status: res.status,
+                matchCount: data?.matches?.length || 0,
+                elapsedMs
+            });
+
             if (!res.ok) {
                 setStatus(`Error: ${data?.error || "failed to load matches"}`);
                 return;
@@ -426,7 +547,7 @@ export default function TournamentAdmin() {
                 await generatePlayLinksForAllMatches(list);
             }
         } catch (err) {
-            console.error(err);
+            console.error('[CLIENT] loadMatchesForRound ERROR', { error: err.message });
             setStatus("Error: could not load matches (check console).");
         }
     }

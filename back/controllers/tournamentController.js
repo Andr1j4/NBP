@@ -1,6 +1,7 @@
 const cassandra = require('../db/cassandra');
 const { randomUUID } = require('crypto');
 const { types } = require('cassandra-driver');
+const { queryWithRetry } = require("../utils/cassandraHelper");
 
 
 async function fetchPlayLink(gameId, player_id) {
@@ -42,48 +43,42 @@ async function createTournament(req, res) {
             location,
             startDate,
             endDate,
-            type = 'single_elim',   // ⬅️ tournament format
-            timeControl = '5+0',    // ⬅️ e.g. "5+0", "3+2", "15+10"
+            type = 'single_elim',
+            timeControl = '5+0',
         } = req.body || {};
 
+        console.log('[CREATE_TOURNAMENT] Starting tournament creation', {
+            name,
+            location,
+            type,
+            timeControl,
+            timestamp: new Date().toISOString(),
+        });
+
         if (!name) {
-            return res.status(400).json({
-                error: 'name is required\n full table\n tournament_id,name,location,start_date,end_date,status,type,time_control'
-            });
+            console.warn('[CREATE_TOURNAMENT] Missing name field');
+            return res.status(400).json({ error: 'name is required' });
         }
 
         const tournamentId = randomUUID();
         const now = new Date();
 
+        console.log('[CREATE_TOURNAMENT] Generated tournamentId', { tournamentId });
+
         await cassandra.execute(
-            `
-            INSERT INTO tournaments (
-                tournament_id,
-                name,
-                location,
-                start_date,
-                end_date,
-                status,
-                type,
-                time_control,
-                created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-            [
-                tournamentId,
-                name,
-                location || null,
-                startDate || null,
-                endDate || null,
-                'registration',   // or 'created', but be consistent
-                type,
-                timeControl,
-                now
-            ],
+            `INSERT INTO tournaments (tournament_id, name, location, start_date, end_date, status, type, time_control, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [tournamentId, name, location || null, startDate || null, endDate || null, 'registration', type, timeControl, now],
             { prepare: true }
         );
 
-        return res.status(201).json({
+        console.log('[CREATE_TOURNAMENT] Successfully inserted to Cassandra', {
+            tournamentId,
+            name,
+            status: 'registration',
+        });
+
+        const response = {
+            id: tournamentId,
             tournamentId,
             name,
             location: location || null,
@@ -93,34 +88,51 @@ async function createTournament(req, res) {
             type,
             timeControl,
             createdAt: now
-        });
+        };
+
+        console.log('[CREATE_TOURNAMENT] Returning response', response);
+
+        return res.status(201).json(response);
     } catch (err) {
-        console.error('[ERROR] createTournament:', err);
+        console.error('[CREATE_TOURNAMENT] ERROR', {
+            error: err.message,
+            stack: err.stack,
+            timestamp: new Date().toISOString(),
+        });
         res.status(500).json({ error: 'Internal server error' });
     }
 }
 
-// POST /api/tournaments/:id/register
 async function registerPlayer(req, res) {
     try {
         const tournament_id = req.params.id;
         const { player_id, rating } = req.body || {};
 
-        if (!player_id) {
-            return res.status(400).json({ error: 'player_id is required, full table\n player_id,rating' });
-        }
+        console.log('[REGISTER_PLAYER] Starting player registration', {
+            tournament_id,
+            player_id,
+            rating,
+            timestamp: new Date().toISOString(),
+        });
 
+        if (!player_id) {
+            console.warn('[REGISTER_PLAYER] Missing player_id');
+            return res.status(400).json({ error: 'player_id is required' });
+        }
 
         const joined_at = new Date();
 
-        // Optionally fetch rating from players table first
-
-        // Example CQL
         await cassandra.execute(
             'INSERT INTO tournament_players (tournament_id, player_id, joined_at, rating) VALUES (?, ?, ?, ?)',
             [tournament_id, player_id, joined_at, rating],
             { prepare: true }
         );
+
+        console.log('[REGISTER_PLAYER] Successfully registered player', {
+            tournament_id,
+            player_id,
+            joined_at,
+        });
 
         return res.status(201).json({
             tournament_id,
@@ -128,11 +140,15 @@ async function registerPlayer(req, res) {
             joined_at,
         });
     } catch (err) {
-        console.error('[ERROR] registerPlayer:', err);
+        console.error('[REGISTER_PLAYER] ERROR', {
+            error: err.message,
+            tournament_id: req.params.id,
+            player_id: req.body?.player_id,
+            stack: err.stack,
+        });
         res.status(500).json({ error: 'Internal server error' });
     }
 }
-
 
 async function listTournamentPlayers(req, res) {
     try {
@@ -165,7 +181,13 @@ async function startRound(req, res) {
         const tournamentId = req.params.id;
         const requestedRound = req.body?.round; // optional
 
-        // 1) Load tournament (type is important: single_elim vs swiss later)
+        console.log('[START_ROUND] Starting round creation', {
+            tournamentId,
+            requestedRound,
+            timestamp: new Date().toISOString(),
+        });
+
+        // 1) Load tournament
         const tResult = await cassandra.execute(
             "SELECT tournament_id, status, type FROM tournaments WHERE tournament_id = ?",
             [tournamentId],
@@ -173,13 +195,16 @@ async function startRound(req, res) {
         );
 
         if (!tResult.rowLength) {
+            console.warn('[START_ROUND] Tournament not found', { tournamentId });
             return res.status(404).json({ error: "Tournament not found" });
         }
 
         const tournament = tResult.rows[0];
-        const format = tournament.type || "single_elim";
+        const format = String(tournament.type || "single_elim").trim().toLowerCase();
 
-        // 2) Read existing rounds (source of truth)
+        console.log('[START_ROUND] Loaded tournament', { tournamentId, format });
+
+        // 2) Read existing rounds
         const roundsResult = await cassandra.execute(
             "SELECT round, finished_at FROM rounds_by_tournament WHERE tournament_id = ?",
             [tournamentId],
@@ -191,24 +216,16 @@ async function startRound(req, res) {
             finished: !!r.finished_at,
         }));
 
+        console.log('[START_ROUND] Existing rounds', { tournamentId, rounds: existingRounds });
+
         // 3) Decide which round to start
         let round = requestedRound;
 
         if (round) {
             const exists = existingRounds.find((r) => r.round === round);
             if (exists) {
+                console.warn('[START_ROUND] Round already exists', { tournamentId, round });
                 return res.status(400).json({ error: "This round already exists", round });
-            }
-
-            const prevRound = round - 1;
-            if (prevRound > 0) {
-                const prev = existingRounds.find((r) => r.round === prevRound);
-                if (!prev || !prev.finished) {
-                    return res.status(400).json({
-                        error: "Previous round is not finished yet",
-                        lastRound: prevRound,
-                    });
-                }
             }
         } else {
             if (existingRounds.length === 0) {
@@ -217,6 +234,7 @@ async function startRound(req, res) {
                 const maxRound = Math.max(...existingRounds.map((r) => r.round));
                 const lastRound = existingRounds.find((r) => r.round === maxRound);
                 if (!lastRound.finished) {
+                    console.warn('[START_ROUND] Previous round not finished', { tournamentId, maxRound });
                     return res.status(400).json({
                         error: "Previous round is not finished yet",
                         lastRound: maxRound,
@@ -226,11 +244,14 @@ async function startRound(req, res) {
             }
         }
 
-        // 4) Decide which players play this round
+        console.log('[START_ROUND] Determined round number', { tournamentId, round, format });
+
+        // 4) Load players
         let players = [];
 
         if (format === "single_elim") {
             if (round === 1) {
+                // Round 1: load all registered tournament players
                 const playersResult = await cassandra.execute(
                     "SELECT player_id, rating FROM tournament_players WHERE tournament_id = ?",
                     [tournamentId],
@@ -241,19 +262,23 @@ async function startRound(req, res) {
                     id: r.player_id,
                     rating: r.rating,
                 }));
+
+                console.log('[START_ROUND] Loaded players for round 1', { tournamentId, playerCount: players.length });
             } else {
+                // Round 2+: load WINNERS from previous round
                 const prevRound = round - 1;
                 const matchesResult = await cassandra.execute(
                     `
-            SELECT white_player, black_player, result
-            FROM matches
-            WHERE tournament_id = ? AND round = ?
-          `,
+                    SELECT white_player, black_player, result
+                    FROM matches
+                    WHERE tournament_id = ? AND round = ?
+                    `,
                     [tournamentId, prevRound],
                     { prepare: true }
                 );
 
                 if (!matchesResult.rowLength) {
+                    console.warn('[START_ROUND] No matches from previous round', { tournamentId, prevRound });
                     return res.status(400).json({
                         error: `No matches found for previous round ${prevRound}`,
                     });
@@ -268,30 +293,46 @@ async function startRound(req, res) {
 
                     if (!result) {
                         hasUnfinished = true;
+                        console.warn('[START_ROUND] Unfinished match found', { white: white_player, black: black_player });
                         continue;
                     }
 
-                    if (result === "1-0") winners.push(white_player);
-                    else if (result === "0-1") winners.push(black_player);
-                    else if (result === "1/2-1/2") hasDraws = true;
+                    if (result === "1-0") {
+                        winners.push(white_player);
+                    } else if (result === "0-1") {
+                        winners.push(black_player);
+                    } else if (result === "1/2-1/2") {
+                        hasDraws = true;
+                        console.warn('[START_ROUND] Draw found (needs resolution)', { white: white_player, black: black_player });
+                    }
                 }
 
                 if (hasUnfinished || hasDraws) {
+                    console.error('[START_ROUND] Cannot start KO round', { hasUnfinished, hasDraws });
                     return res.status(400).json({
-                        error:
-                            "Cannot start next KO round: some games are unfinished or ended in a draw that needs tie-break.",
+                        error: "Cannot start next KO round: some games are unfinished or ended in a draw that needs tie-break.",
                         previousRound: prevRound,
                         details: { hasUnfinished, hasDraws },
                     });
                 }
 
                 if (winners.length < 2) {
+                    console.warn('[START_ROUND] Not enough winners for next round', { winnersCount: winners.length });
                     return res.status(400).json({
                         error: "Not enough winners to create next round",
                         winnersCount: winners.length,
                     });
                 }
 
+                console.log('[START_ROUND] Found winners from previous round', {
+                    tournamentId,
+                    round,
+                    prevRound,
+                    winnerCount: winners.length,
+                    winners: winners.map(w => String(w))
+                });
+
+                // ✅ Load player details for winners
                 players = [];
                 for (const pid of winners) {
                     const pRes = await cassandra.execute(
@@ -306,8 +347,15 @@ async function startRound(req, res) {
                         });
                     }
                 }
+
+                console.log('[START_ROUND] Loaded player details for winners', {
+                    tournamentId,
+                    round,
+                    playerCount: players.length
+                });
             }
         } else {
+            // Swiss/Round-robin: load all players every round
             const playersResult = await cassandra.execute(
                 "SELECT player_id, rating FROM tournament_players WHERE tournament_id = ?",
                 [tournamentId],
@@ -318,9 +366,30 @@ async function startRound(req, res) {
                 id: r.player_id,
                 rating: r.rating,
             }));
+
+            console.log('[START_ROUND] Loaded all players for', format, { tournamentId, playerCount: players.length });
+
+            if (format === "round_robin") {
+                const maxRounds = roundRobinTotalRounds(players.length);
+                console.log('[START_ROUND] Round-robin maxRounds', { tournamentId, maxRounds, requested: round });
+                if (round > maxRounds) {
+                    // ✅ auto-finish tournament when max rounds reached
+                    await cassandra.execute(
+                        "UPDATE tournaments SET status = ? WHERE tournament_id = ?",
+                        ["finished", tournamentId],
+                        { prepare: true }
+                    );
+                    return res.status(400).json({
+                        error: "round_robin_finished",
+                        maxRounds,
+                        requestedRound: round,
+                    });
+                }
+            }
         }
 
         if (players.length < 2) {
+            console.warn('[START_ROUND] Not enough players', { tournamentId, playerCount: players.length });
             return res.status(400).json({
                 error: "Not enough players to start a round (need at least 2)",
                 playersCount: players.length,
@@ -335,45 +404,42 @@ async function startRound(req, res) {
         }
 
         const pairings = [];
-        const byes = [];
+        const byes = [];  // ✅ Track bye rounds
 
         for (let i = 0; i < shuffled.length; i += 2) {
             if (i + 1 >= shuffled.length) {
+                // ✅ NEW: Handle bye (unpaired player)
                 byes.push(shuffled[i]);
+                console.log('[START_ROUND] Bye assigned to player:', shuffled[i].id);
                 break;
             }
             pairings.push({ white: shuffled[i], black: shuffled[i + 1] });
         }
 
         if (pairings.length === 0) {
-            return res.status(400).json({ error: "Not enough players to create any pairing" });
+            console.warn('[START_ROUND] Not enough players for pairings', { playerCount: shuffled.length });
+            return res.status(400).json({ error: "Not enough players to create pairings" });
         }
+
+        console.log('[START_ROUND] Created pairings', {
+            tournamentId,
+            round,
+            pairingCount: pairings.length,
+            byeCount: byes.length  // ✅ Log bye count
+        });
 
         const now = new Date();
 
-        // 6) Insert round row
+        // 6) Insert round
         await cassandra.execute(
-            `
-        INSERT INTO rounds_by_tournament (tournament_id, round, started_at)
-        VALUES (?, ?, ?)
-      `,
+            `INSERT INTO rounds_by_tournament (tournament_id, round, started_at) VALUES (?, ?, ?)`,
             [tournamentId, round, now],
             { prepare: true }
         );
 
-        // helper: ask server for signed playlink for a given player in a given game
-        async function fetchPlayLink(gameId, player_id) {
-            const r = await fetch(`http://10.121.107.106:8080/api/games/${gameId}/playlink`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ player_id }),
-            });
-            const d = await r.json();
-            if (!r.ok) throw new Error(d.error || "playlink_failed");
-            return d; // { playUrl, token, color, ... }
-        }
+        console.log('[START_ROUND] Inserted round to Cassandra', { tournamentId, round, startedAt: now });
 
-        // 7) Insert matches + matches_by_game
+        // 7) Insert matches (WITHOUT playlinks first)
         const queries = [];
         const responsePairings = [];
 
@@ -382,62 +448,24 @@ async function startRound(req, res) {
             const boardNumber = index + 1;
             const gameId = randomUUID();
 
-            queries.push({
-                query: `
-          INSERT INTO matches (
-            tournament_id, round, board_number,
-            game_id, white_player, black_player,
-            result, start_time, end_time
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-                params: [
-                    tournamentId,
-                    round,
-                    boardNumber,
-                    gameId,
-                    pair.white.id,
-                    pair.black.id,
-                    null,
-                    now,
-                    null,
-                ],
+            console.log('[START_ROUND] Creating match', {
+                tournamentId,
+                round,
+                boardNumber,
+                gameId,
+                white: String(pair.white.id),
+                black: String(pair.black.id),
             });
 
             queries.push({
-                query: `
-          INSERT INTO matches_by_game (
-            game_id, tournament_id, round, board_number,
-            white_player, black_player, result, start_time, end_time
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-                params: [
-                    gameId,
-                    tournamentId,
-                    round,
-                    boardNumber,
-                    pair.white.id,
-                    pair.black.id,
-                    null,
-                    now,
-                    null,
-                ],
+                query: `INSERT INTO matches (tournament_id, round, board_number, game_id, white_player, black_player, result, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                params: [tournamentId, round, boardNumber, gameId, pair.white.id, pair.black.id, null, now, null],
             });
 
-            // ✅ NEW: generate signed play links
-            let whiteLink = null;
-            let blackLink = null;
-
-            try {
-                whiteLink = await fetchPlayLink(gameId, String(pair.white.id));
-            } catch (e) {
-                console.warn("[WARN] playlink(white) failed:", e.message);
-            }
-
-            try {
-                blackLink = await fetchPlayLink(gameId, String(pair.black.id));
-            } catch (e) {
-                console.warn("[WARN] playlink(black) failed:", e.message);
-            }
+            queries.push({
+                query: `INSERT INTO matches_by_game (game_id, tournament_id, round, board_number, white_player, black_player, result, start_time, end_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                params: [gameId, tournamentId, round, boardNumber, pair.white.id, pair.black.id, null, now, null],
+            });
 
             responsePairings.push({
                 board: boardNumber,
@@ -445,34 +473,158 @@ async function startRound(req, res) {
                 white: String(pair.white.id),
                 black: String(pair.black.id),
                 urls: {
-                    // prefer signed token links; fallback to legacy if playlink failed
-                    white: whiteLink?.playUrl || `/play?game_id=${gameId}&color=w`,
-                    black: blackLink?.playUrl || `/play?game_id=${gameId}&color=b`,
+                    white: null,
+                    black: null,
                 },
             });
         }
 
+        // ✅ NEW: Add byes to response
+        for (const byePlayer of byes) {
+            responsePairings.push({
+                board: pairings.length + byes.indexOf(byePlayer) + 1,
+                gameId: null,
+                white: String(byePlayer.id),
+                black: "BYE",
+                urls: { white: null, black: null },
+            });
+
+            console.log('[START_ROUND] Bye player gets automatic point:', String(byePlayer.id));
+
+            // ✅ Give bye player 1 point automatically (only for swiss/round_robin)
+            if (format !== "single_elim") {
+                try {
+                    const existingPoints = await cassandra.execute(
+                        "SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?",
+                        [tournamentId, byePlayer.id],
+                        { prepare: true }
+                    );
+                    const currentPoints = existingPoints.rowLength ? existingPoints.rows[0].points : 0.0;
+
+                    await cassandra.execute(
+                        "INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)",
+                        [tournamentId, byePlayer.id, currentPoints + 1.0],
+                        { prepare: true }
+                    );
+
+                    console.log('[START_ROUND] Updated bye player points:', {
+                        playerId: String(byePlayer.id),
+                        newPoints: currentPoints + 1.0
+                    });
+                } catch (e) {
+                    console.warn('[START_ROUND] Failed to award bye point:', e.message);
+                }
+            }
+        }
+
         await cassandra.batch(queries, { prepare: true });
 
-        // 8) Mark tournament running
-        await cassandra.execute("UPDATE tournaments SET status = ? WHERE tournament_id = ?", ["running", tournamentId], {
-            prepare: true,
+        console.log('[START_ROUND] Inserted all matches to Cassandra', {
+            tournamentId,
+            round,
+            matchCount: pairings.length,
         });
 
-        return res.status(201).json({
+        // ✅ WAIT za eventual consistency
+        console.log('[START_ROUND] Waiting for Cassandra consistency...');
+        await new Promise(r => setTimeout(r, 500));
+
+        // 8) Mark tournament running
+        await cassandra.execute(
+            "UPDATE tournaments SET status = ? WHERE tournament_id = ?",
+            ["running", tournamentId],
+            { prepare: true }
+        );
+
+        console.log('[START_ROUND] Updated tournament status to running', { tournamentId });
+
+        // ✅ AUTOMATIC ROUND COMPLETION HOOK
+        setTimeout(() => {
+            maybeAutoCompleteRound(tournamentId, round)
+                .then(() => console.log(`[AUTO_COMPLETE] Checked round ${round} for tournament ${tournamentId}`))
+                .catch(e => console.warn(`[AUTO_COMPLETE] Error:`, e));
+        }, 2000); // 2 sekunde nakon starta runde
+
+        const response = {
             tournamentId,
             round,
             createdAt: now,
-            pairings: responsePairings,
-            byes: byes.map((p) => String(p.id)),
+            pairings: responsePairings,  // ✅ Now includes byes
+        };
+
+        console.log('[START_ROUND] SUCCESS', {
+            tournamentId,
+            round,
+            pairingCount: pairings.length,
+            byeCount: byes.length
         });
+
+        return res.status(201).json(response);
     } catch (err) {
-        console.error("[ERROR] startRound:", err);
+        console.error('[START_ROUND] ERROR', {
+            error: err.message,
+            stack: err.stack,
+            tournamentId: req.params.id,
+            timestamp: new Date().toISOString(),
+        });
         res.status(500).json({ error: "Internal server error" });
     }
 }
 
+async function maybeAutoCompleteRound(tournamentId, round) {
+    const matchesResult = await cassandra.execute(
+        'SELECT game_id, result FROM matches WHERE tournament_id = ? AND round = ?',
+        [tournamentId, round],
+        { prepare: true }
+    );
 
+    if (!matchesResult.rowLength) return;
+
+    const unfinished = matchesResult.rows.filter(r => !r.result);
+    if (unfinished.length > 0) return;
+
+    const now = new Date();
+    await cassandra.execute(
+        `
+        UPDATE rounds_by_tournament
+        SET finished_at = ?
+        WHERE tournament_id = ? AND round = ?
+        `,
+        [now, tournamentId, round],
+        { prepare: true }
+    );
+
+    console.log(`[INFO] Round ${round} for tournament ${tournamentId} auto-completed at ${now}`);
+
+    // Dodaj automatsko završavanje turnira za single_elim
+    const tRes = await cassandra.execute(
+        'SELECT type FROM tournaments WHERE tournament_id = ?',
+        [tournamentId],
+        { prepare: true }
+    );
+    const type = tRes.rowLength ? tRes.rows[0].type : null;
+
+    if (type === 'single_elim') {
+        // Pozovi completeRound automatski
+        await completeRound({ params: { id: tournamentId, round: String(round) } }, {
+            status: () => ({ json: () => { } }),
+            json: () => { }
+        });
+    }
+
+    if (type === 'round_robin') {
+        const playerCount = await getTournamentPlayerCount(tournamentId);
+        const maxRounds = roundRobinTotalRounds(playerCount);
+        if (round >= maxRounds && maxRounds > 0) {
+            await cassandra.execute(
+                "UPDATE tournaments SET status = ? WHERE tournament_id = ?",
+                ["finished", tournamentId],
+                { prepare: true }
+            );
+            console.log('[ROUND_ROBIN] Tournament finished', { tournamentId, round, maxRounds });
+        }
+    }
+}
 
 async function getStandings(req, res) {
     const { id: tournamentId } = req.params;
@@ -650,200 +802,21 @@ async function completeRound(req, res) {
 }
 
 
-async function maybeAutoCompleteRound(tournamentId, round) {
-    const matchesResult = await cassandra.execute(
-        'SELECT game_id, result FROM matches WHERE tournament_id = ? AND round = ?',
-        [tournamentId, round],
-        { prepare: true }
-    );
-
-    if (!matchesResult.rowLength) return;
-
-    const unfinished = matchesResult.rows.filter(r => !r.result);
-    if (unfinished.length > 0) return;
-
-    const now = new Date();
-    await cassandra.execute(
-        `
-        UPDATE rounds_by_tournament
-        SET finished_at = ?
-        WHERE tournament_id = ? AND round = ?
-        `,
-        [now, tournamentId, round],
-        { prepare: true }
-    );
-
-    console.log(`[INFO] Round ${round} for tournament ${tournamentId} auto-completed at ${now}`);
-}
-
-async function resolveDraw(req, res) {
-    try {
-        const tournamentId = req.params.id;
-        const round = parseInt(req.params.round, 10);
-        const boardNumber = parseInt(req.params.board, 10);
-        const { winner } = req.body || {};
-
-        if (!Number.isInteger(round) || !Number.isInteger(boardNumber)) {
-            return res.status(400).json({ error: 'round and board must be integers' });
-        }
-
-        if (winner !== 'white' && winner !== 'black') {
-            return res.status(400).json({
-                error: 'winner must be "white" or "black"'
-            });
-        }
-
-        // 1) Load the match
-        const matchRes = await cassandra.execute(
-            `
-            SELECT game_id, white_player, black_player, result
-            FROM matches
-            WHERE tournament_id = ? AND round = ? AND board_number = ?
-            `,
-            [tournamentId, round, boardNumber],
-            { prepare: true }
-        );
-
-        if (!matchRes.rowLength) {
-            return res.status(404).json({
-                error: 'Match not found for given tournament / round / board'
-            });
-        }
-
-        const match = matchRes.rows[0];
-        const gameId = match.game_id;
-        const whiteId = match.white_player;
-        const blackId = match.black_player;
-        const oldResult = match.result;
-
-        // 2) Ensure we are actually resolving a draw
-        if (oldResult !== '1/2-1/2') {
-            return res.status(400).json({
-                error: 'Match is not a draw (1/2-1/2), nothing to resolve',
-                currentResult: oldResult
-            });
-        }
-
-        // Old scoring
-        const oldWhitePoints = 0.5;
-        const oldBlackPoints = 0.5;
-
-        // 3) Decide new result & new points
-        let newResult;
-        let newWhitePoints;
-        let newBlackPoints;
-
-        if (winner === 'white') {
-            newResult = '1-0';
-            newWhitePoints = 1.0;
-            newBlackPoints = 0.0;
-        } else {
-            newResult = '0-1';
-            newWhitePoints = 0.0;
-            newBlackPoints = 1.0;
-        }
-
-        // Deltas for leaderboard
-        const deltaWhite = newWhitePoints - oldWhitePoints; // +0.5 or -0.5
-        const deltaBlack = newBlackPoints - oldBlackPoints; // -0.5 or +0.5
-
-        // 4) Update leaderboard_by_player (if you’re using it for KO too)
-        // White
-        const whiteLB = await cassandra.execute(
-            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
-            [tournamentId, whiteId],
-            { prepare: true }
-        );
-        const whiteCurrent = whiteLB.rowLength ? whiteLB.rows[0].points : 0.0;
-        const whiteNew = whiteCurrent + deltaWhite;
-
-        await cassandra.execute(
-            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
-            [tournamentId, whiteId, whiteNew],
-            { prepare: true }
-        );
-
-        // Black
-        const blackLB = await cassandra.execute(
-            'SELECT points FROM leaderboard_by_player WHERE tournament_id = ? AND player_id = ?',
-            [tournamentId, blackId],
-            { prepare: true }
-        );
-        const blackCurrent = blackLB.rowLength ? blackLB.rows[0].points : 0.0;
-        const blackNew = blackCurrent + deltaBlack;
-
-        await cassandra.execute(
-            'INSERT INTO leaderboard_by_player (tournament_id, player_id, points) VALUES (?, ?, ?)',
-            [tournamentId, blackId, blackNew],
-            { prepare: true }
-        );
-
-        console.log(
-            `[INFO] resolveDraw: updated leaderboard_by_player: white=${whiteId} -> ${whiteNew}, black=${blackId} -> ${blackNew}`
-        );
-
-        // 5) Update matches
-        await cassandra.execute(
-            `
-            UPDATE matches
-            SET result = ?
-            WHERE tournament_id = ? AND round = ? AND board_number = ?
-            `,
-            [newResult, tournamentId, round, boardNumber],
-            { prepare: true }
-        );
-
-        // 6) Update matches_by_game
-        await cassandra.execute(
-            `
-            UPDATE matches_by_game
-            SET result = ?
-            WHERE game_id = ?
-            `,
-            [newResult, gameId],
-            { prepare: true }
-        );
-
-        console.log(
-            `[INFO] resolveDraw: match updated to ${newResult} for tournament=${tournamentId} round=${round} board=${boardNumber}`
-        );
-
-
-
-        return res.status(200).json({
-            ok: true,
-            tournamentId,
-            round,
-            boardNumber,
-            gameId,
-            oldResult,
-            newResult,
-            leaderboard: {
-                white: { playerId: whiteId, points: whiteNew },
-                black: { playerId: blackId, points: blackNew }
-            }
-        });
-
-    } catch (err) {
-        console.error('[ERROR] resolveDraw:', err);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-}
-
 async function listTournaments(req, res) {
     try {
+        console.log('[LIST_TOURNAMENTS] Loading all tournaments', {
+            timestamp: new Date().toISOString(),
+        });
+
         const result = await cassandra.execute(
-            `
-            SELECT tournament_id, name, location, start_date, end_date,
-                   status, type, time_control, created_at
-            FROM tournaments
-            `,
+            `SELECT tournament_id, name, location, start_date, end_date, status, type, time_control, created_at FROM tournaments`,
             [],
             { prepare: true }
         );
 
         const tournaments = result.rows.map(row => ({
             id: row.tournament_id,
+            tournamentId: row.tournament_id,
             name: row.name,
             location: row.location,
             startDate: row.start_date,
@@ -854,9 +827,14 @@ async function listTournaments(req, res) {
             createdAt: row.created_at,
         }));
 
+        console.log('[LIST_TOURNAMENTS] SUCCESS', { tournamentCount: tournaments.length });
+
         res.json({ tournaments });
     } catch (err) {
-        console.error('[ERROR] listTournaments:', err);
+        console.error('[LIST_TOURNAMENTS] ERROR', {
+            error: err.message,
+            stack: err.stack,
+        });
         res.status(500).json({ error: 'Internal server error' });
     }
 }
@@ -1048,6 +1026,106 @@ async function getSanMovesFromStream(redis, gameId) {
 
 
 
+// ✅ NEW: Safe round loading sa retry
+async function loadRoundsForTournamentSafe(tournamentId, maxWaitMs = 2000) {
+    console.log('[LOAD_ROUNDS_SAFE] Starting with retry logic', { tournamentId, maxWaitMs });
+
+    const startTime = Date.now();
+    let lastResult = null;
+
+    while (Date.now() - startTime < maxWaitMs) {
+        try {
+            const result = await cassandra.execute(
+                "SELECT round, finished_at FROM rounds_by_tournament WHERE tournament_id = ?",
+                [tournamentId],
+                { prepare: true }
+            );
+
+            const rounds = result.rows.map(r => ({
+                round: r.round,
+                finishedAt: r.finished_at,
+            }));
+
+            // ✅ If we got new rounds, return immediately
+            if (rounds.length > (lastResult?.length || 0)) {
+                console.log('[LOAD_ROUNDS_SAFE] Found new rounds:', { count: rounds.length });
+                return rounds;
+            }
+
+            lastResult = rounds;
+
+            if (result.rowLength === 0) {
+                const elapsedMs = Date.now() - startTime;
+                if (elapsedMs < maxWaitMs) {
+                    console.log('[LOAD_ROUNDS_SAFE] No rounds yet, retrying...', { elapsedMs });
+                    await new Promise(r => setTimeout(r, 200));
+                    continue;
+                }
+            }
+
+            return rounds;
+        } catch (err) {
+            console.error('[LOAD_ROUNDS_SAFE] Query error:', err.message);
+            throw err;
+        }
+    }
+
+    console.warn('[LOAD_ROUNDS_SAFE] Timeout after', maxWaitMs, 'ms');
+    return lastResult || [];
+}
+
+// ✅ NEW: Safe match loading
+async function loadMatchesSafe(tournamentId, round, maxWaitMs = 3000) {
+    console.log('[LOAD_MATCHES_SAFE] Starting with retry', { tournamentId, round, maxWaitMs });
+
+    const startTime = Date.now();
+    let lastCount = 0;
+
+    while (Date.now() - startTime < maxWaitMs) {
+        try {
+            const result = await cassandra.execute(
+                `SELECT board_number, game_id, white_player, black_player, result
+                 FROM matches WHERE tournament_id = ? AND round = ?`,
+                [tournamentId, round],
+                { prepare: true }
+            );
+
+            const matches = result.rows.map(r => ({
+                boardNumber: r.board_number,
+                gameId: r.game_id.toString(),
+                whitePlayer: r.white_player.toString(),
+                blackPlayer: r.black_player.toString(),
+                result: r.result || ""
+            }));
+
+            // ✅ If we got new matches, return immediately
+            if (matches.length > lastCount && matches.length > 0) {
+                console.log('[LOAD_MATCHES_SAFE] Found matches:', { count: matches.length });
+                return matches;
+            }
+
+            lastCount = matches.length;
+
+            if (matches.length === 0) {
+                const elapsedMs = Date.now() - startTime;
+                if (elapsedMs < maxWaitMs) {
+                    console.log('[LOAD_MATCHES_SAFE] No matches yet, retrying...', { elapsedMs });
+                    await new Promise(r => setTimeout(r, 300));
+                    continue;
+                }
+            }
+
+            return matches;
+        } catch (err) {
+            console.error('[LOAD_MATCHES_SAFE] Query error:', err.message);
+            throw err;
+        }
+    }
+
+    console.warn('[LOAD_MATCHES_SAFE] Timeout after', maxWaitMs, 'ms');
+    return [];
+}
+
 module.exports = {
     createTournament,
     registerPlayer,
@@ -1055,10 +1133,17 @@ module.exports = {
     startRound,
     getStandings,
     completeRound,
-    resolveDraw,
     listTournaments,
     getTournamentInfo,
     listRounds,
     getRoundMatches,
-    getSanMovesFromStream
+    getSanMovesFromStream,
+    loadRoundsForTournamentSafe,
+    loadMatchesSafe,
 };
+
+function roundRobinTotalRounds(playerCount) {
+    // N = broj registrovanih igrača
+    if (!playerCount || playerCount < 2) return 0;
+    return playerCount % 2 === 0 ? playerCount - 1 : playerCount;
+}

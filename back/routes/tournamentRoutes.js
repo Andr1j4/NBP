@@ -9,7 +9,6 @@ const {
     getStandings,
     completeRound,
     resolveDraw,
-    listRoundMatches,
     listTournaments,
     listRounds,
     getTournamentInfo,
@@ -37,10 +36,7 @@ router.post(
     completeRound
 );
 
-router.post(
-    '/:id/rounds/:round/boards/:board/resolve-draw',
-    resolveDraw
-)
+// router.post('/:id/rounds/:round/boards/:board/resolve-draw',resolveDraw)
 
 router.get('/:id/rounds', listRounds);
 
