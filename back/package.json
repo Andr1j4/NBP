@@ -11,12 +11,15 @@
   "author": "Djordje Stojiljkovic",
   "license": "ISC",
   "dependencies": {
+    "bcrypt": "^6.0.0",
     "cassandra-driver": "^4.8.0",
     "chess.js": "^1.4.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.3",
     "redis": "^5.10.0",
+    "uuid": "^8.3.2",
     "ws": "^8.18.2"
   },
-  "proxy": "http://192.168.0.2:8080"
+  "proxy": "http://10.121.107.106:8080"
 }

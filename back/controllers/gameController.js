@@ -1,5 +1,17 @@
 // back/controllers/gameController.js
 const cassandra = require("../db/cassandra");
+const { types } = require("cassandra-driver");
+
+function asUuid(value, label = "uuid") {
+    if (!value) throw new Error(`Missing ${label}`);
+    if (typeof value === "string") return types.Uuid.fromString(value);
+    // cassandra-driver sometimes returns Uuid objects already
+    if (value instanceof types.Uuid) return value;
+    // if object with toString
+    if (typeof value.toString === "function") return types.Uuid.fromString(value.toString());
+    throw new Error(`Invalid ${label}: ${String(value)}`);
+}
+
 
 async function getGameMovesFromRedis(req, res) {
     const { gameId } = req.params;
@@ -54,12 +66,12 @@ async function getGameArchiveFromCassandra(req, res) {
       SELECT game_id, tournament_id, round, board_number,
              white_player, black_player,
              result, reason, start_time, end_time,
-             final_fen, san_moves
-      FROM game_archive_by_id
+             final_fen, san_moves, time_control, created_at
+      FROM turnir.game_archive_by_id
       WHERE game_id = ?
     `;
 
-        const r = await cassandra.execute(q, [gameId], { prepare: true });
+        const r = await cassandra.execute(q, [asUuid(gameId, "gameId")], { prepare: true });
 
         if (!r.rowLength) {
             return res.status(404).json({ error: "archive_not_found" });
@@ -80,6 +92,8 @@ async function getGameArchiveFromCassandra(req, res) {
             end_time: row.end_time || null,
             finalFen: row.final_fen || null,
             sanMoves: row.san_moves || [],
+            timeControl: row.time_control || null,
+            createdAt: row.created_at || null,
         });
     } catch (err) {
         console.error("[ERROR] getGameArchiveFromCassandra:", err);
@@ -87,9 +101,7 @@ async function getGameArchiveFromCassandra(req, res) {
     }
 }
 
-module.exports = {
-    getGameArchiveFromCassandra,
-};
+module.exports = { getGameArchiveFromCassandra };
 
 
 module.exports = {

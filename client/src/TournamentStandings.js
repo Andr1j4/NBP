@@ -16,7 +16,7 @@ export default function TournamentStandings() {
 
         try {
             // if you have CRA proxy set up to 8080, `/api/...` is enough
-            const res = await fetch(`http://192.168.0.2:8080/api/tournaments/${tournamentId}/standings`);
+            const res = await fetch(`http://10.121.107.106:8080/api/tournaments/${tournamentId}/standings`);
 
             if (!res.ok) {
                 throw new Error(`HTTP ${res.status}`);

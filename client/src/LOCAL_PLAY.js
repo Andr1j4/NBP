@@ -19,7 +19,7 @@ export default function LOCAL_PLAY() {
             return;
         }
 
-        const socket = new WebSocket(`ws://192.168.0.3:8080/${gameId}/${colorFromURL}`);
+        const socket = new WebSocket(`ws://10.121.107.106:8080/${gameId}/${colorFromURL}`);
 
         socket.onopen = () => {
             console.log("WebSocket connection established");
@@ -35,10 +35,6 @@ export default function LOCAL_PLAY() {
 
                 setGamePosition(game.fen());
 
-                // exit if the game is over
-                // if (game.isGameOver() || game.isDraw()) {
-                //     alert("Game over");
-                // };
                 if (g.isGameOver() || g.isDraw()) {
                     let result = null;
                     let reason = null;
@@ -84,14 +80,6 @@ export default function LOCAL_PLAY() {
         };
     }, [gameId, colorFromURL]);
 
-    function safeGameMutate(modify) {
-        setGame(prevGame => {
-            const updatedGame = new Chess(prevGame.fen());
-            modify(updatedGame);
-            setGamePosition(updatedGame.fen());
-            return updatedGame;
-        });
-    }
 
     function undoMove() {
         game.undo();

@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 
 export default function ReplayBoard({ gameId }) {
-    const API_BASE = "http://192.168.0.2:8080";
+    const API_BASE = "http://10.121.107.106:8080";
 
     const [loading, setLoading] = useState(false);
     const [err, setErr] = useState("");
