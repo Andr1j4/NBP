@@ -1,6 +1,7 @@
 const isDev = process.env.NODE_ENV === "development";
 
-const API_HOST = process.env.REACT_APP_API_HOST || "192.168.0.2";
+// Docker: backend je iz perspektive browser-a na localhost:8080
+const API_HOST = process.env.REACT_APP_API_HOST || "localhost";
 const API_PORT = process.env.REACT_APP_API_PORT || "8080";
 const WS_PROTOCOL = process.env.REACT_APP_WS_PROTOCOL || "ws";
 

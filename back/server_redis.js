@@ -18,9 +18,11 @@ const cors = require("cors");
 const { WebSocketServer } = require("ws");
 const redis = require("./db/redis");
 const cassandra = require("./db/cassandra");
+const fs = require("fs");
+const path = require("path"); // ✅ NOVO
 
 // ✅ Extracted utilities
-const { PORT, FRONTEND_BASE } = require("./utils/config");
+const { PORT, FRONTEND_BASE, CORS_ORIGINS } = require("./utils/config");
 const { signPlayToken, verifyPlayToken } = require("./utils/token");
 const { asUuid, normalizeUuid } = require("./utils/uuid");
 const { parseWsUrl, getJwtFromWsReq, getPlayFromWsReq } = require("./utils/wsAuth");
@@ -44,16 +46,12 @@ const tournamentRoutes = require("./routes/tournamentRoutes");
 
 const app = express();
 
-app.use(cors({
-  origin: [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://192.168.0.1:3000",
-    "http://192.168.0.2:3000",
-    "http://10.121.107.106:3000",
-  ],
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: CORS_ORIGINS, // ✅ sada dolazi iz config.js (env/local/docker)
+    credentials: true,
+  })
+);
 
 app.use(express.json());
 
@@ -70,8 +68,14 @@ app.locals.redis = redis;
 //  SERVER + WS
 // ===============================================
 
-const server = app.listen(PORT, () => {
+async function runSchemaInit() {
+  // Šema (keyspace + tabele) se sada inicijalizuje u db/cassandra.js (ensureKeyspace + initSchema)
+  console.log("[SCHEMA_INIT] Skipping here – handled in db/cassandra.ensureKeyspace()");
+}
+
+const server = app.listen(PORT, async () => {
   console.log(`[INFO] Server started on port ${PORT}`);
+  await runSchemaInit();
 });
 
 const wss = new WebSocketServer({ server });

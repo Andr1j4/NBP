@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  cassandra:
+    image: cassandra:4.1
+    ports:
+      - "9042:9042"
+
+  back:
+    build: ./back
+    environment:
+      RUN_ENV: docker
+      REDIS_URL: redis://redis:6379
+      CASSANDRA_HOSTS: cassandra
+      CASSANDRA_KEYSPACE: turnir
+      FRONTEND_BASE: http://localhost:3000
+      JWT_SECRET: dev_jwt_secret_change_me
+      PLAYLINK_SECRET: dev_playlink_secret_change_me
+
+      # ❗ OVO OBEZBEĐUJE DA SE TABELA NAPRAVI
+      INIT_SCHEMA: "1"
+      SCHEMA_FILE: "/app/schema.cql"
+
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redis
+      - cassandra
+
+  client:
+    build: ./client
+    environment:
+      REACT_APP_API_HOST: localhost
+      REACT_APP_API_PORT: 8080
+      REACT_APP_WS_PROTOCOL: ws
+    ports:
+      - "3000:3000"
+    depends_on:
+      - back

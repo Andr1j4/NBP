@@ -332,18 +332,23 @@ async function startRound(req, res) {
                     winners: winners.map(w => String(w))
                 });
 
-                // ✅ Load player details for winners
+                // ✅ FIX: umesto players, koristi tournament_players za ovaj turnir
                 players = [];
                 for (const pid of winners) {
                     const pRes = await cassandra.execute(
-                        "SELECT player_id, rating FROM players WHERE player_id = ?",
-                        [pid],
+                        "SELECT player_id, rating FROM tournament_players WHERE tournament_id = ? AND player_id = ?",
+                        [tournamentId, pid],
                         { prepare: true }
                     );
                     if (pRes.rowLength) {
                         players.push({
                             id: pRes.rows[0].player_id,
                             rating: pRes.rows[0].rating,
+                        });
+                    } else {
+                        console.warn('[START_ROUND] Winner not found in tournament_players', {
+                            tournamentId,
+                            playerId: String(pid),
                         });
                     }
                 }
