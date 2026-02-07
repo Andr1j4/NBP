@@ -22,7 +22,7 @@ const fs = require("fs");
 const path = require("path"); // ✅ NOVO
 
 // ✅ Extracted utilities
-const { PORT, FRONTEND_BASE, CORS_ORIGINS } = require("./utils/config");
+const { PORT, FRONTEND_BASE, CORS_ORIGINS, ALLOW_ALL_CORS } = require("./utils/config");
 const { signPlayToken, verifyPlayToken } = require("./utils/token");
 const { asUuid, normalizeUuid } = require("./utils/uuid");
 const { parseWsUrl, getJwtFromWsReq, getPlayFromWsReq } = require("./utils/wsAuth");
@@ -46,12 +46,22 @@ const tournamentRoutes = require("./routes/tournamentRoutes");
 
 const app = express();
 
-app.use(
-  cors({
-    origin: CORS_ORIGINS, // ✅ sada dolazi iz config.js (env/local/docker)
-    credentials: true,
-  })
-);
+if (ALLOW_ALL_CORS) {
+  // ✅ dozvoli bilo koji Origin, i dalje sa credentials
+  app.use(
+    cors({
+      origin: true,        // echo nazad bilo koji Origin
+      credentials: true,
+    })
+  );
+} else {
+  app.use(
+    cors({
+      origin: CORS_ORIGINS,
+      credentials: true,
+    })
+  );
+}
 
 app.use(express.json());
 

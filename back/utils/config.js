@@ -1,5 +1,6 @@
 const RUN_ENV = process.env.RUN_ENV || process.env.NODE_ENV || "local";
 const isDocker = RUN_ENV === "docker";
+const ALLOW_ALL_CORS = process.env.CORS_ALLOW_ALL === "1"; // ✅ novo
 
 module.exports = {
     PORT: process.env.PORT || 8080,
@@ -34,4 +35,6 @@ module.exports = {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+
+    ALLOW_ALL_CORS, // ✅ eksport
 };
