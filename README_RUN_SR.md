@@ -18,12 +18,17 @@ npm start
 
 ### Potrebno pre toga
 - Redis i Cassandra moraju raditi.
-- Cassandra keyspace/tabele moraju postojati (npr. `turnir`).
+- Cassandra keyspace/tabele moraju postojati, ovde koristimo `turnir`.
 
 ## 2) Docker (docker-compose)
 
+### Kreiranje image-a back koji sadrzi cassandru sa kreiranom tabelom.
 ```bash
-docker compose up --build
+docker compose build back
+```
+
+```bash
+docker compose up
 ```
 
 Servisi:
@@ -32,16 +37,4 @@ Servisi:
 - `redis` → localhost:6379
 - `cassandra` → localhost:9042
 
-> Napomena: i dalje moraš inicijalno kreirati keyspace/tabele u Cassandri.
-
-## Automatizovana inicijalizacija šeme
-```bash
-# lokalno
-INIT_SCHEMA=1 SCHEMA_FILE=./back/schema.cql npm --prefix ./back run start
-```
-
-Ako koristiš Docker, postavi env:
-```
-INIT_SCHEMA=1
-SCHEMA_FILE=/app/schema.cql
-```
+### Cassandra i redis su prazni nakon podizanja container-a, potrebno je rucno kreirati turnir i istestirati/koristiti aplikaciju :D 
