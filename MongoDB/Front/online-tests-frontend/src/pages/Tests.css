@@ -1,0 +1,67 @@
+﻿.tests-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 65%;
+    margin: 0 auto;
+}
+
+.test-card {
+    text-decoration: none;
+    background-color: #ffcc00;
+    color: #282c34;
+    padding: 15px;
+    border-radius: 10px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 16px;
+    transition: 0.2s;
+    width: 100%;
+}
+
+    .test-card:hover {
+        transform: scale(1.02);
+        background-color: #e6b800;
+    }
+
+    .test-card span {
+        font-weight: normal;
+        font-size: 13px;
+    }
+
+.test-actions {
+    margin-top: 8px;
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+}
+
+.delete-btn {
+    background-color: #e74c3c;
+    color: white;
+    border: none;
+    padding: 4px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+    .delete-btn:hover {
+        background-color: #c0392b;
+    }
+
+
+.open-btn {
+    background-color: #3498db;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: 0.2s;
+}
+
+    .open-btn:hover {
+        background-color: #2980b9;
+    }

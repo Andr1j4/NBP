@@ -1,0 +1,87 @@
+.areas-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 15px;
+}
+
+.area-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.area-btn {
+    padding: 10px 20px;
+    font-size: 16px;
+    background-color: #3498db;
+    border: none;
+    color: white;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+    .area-btn:hover {
+        background-color: #2980b9;
+    }
+
+.delete-btn {
+    padding: 5px 10px;
+    background-color: #e74c3c;
+    border: none;
+    color: white;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+    .delete-btn:hover {
+        background-color: #c0392b;
+    }
+
+.areas-container {
+    padding: 40px;
+    text-align: center;
+    background-color: #f0f0f0;
+    min-height: 100vh;
+}
+
+h1 {
+    margin-bottom: 30px;
+}
+
+.add-oblast-button {
+    padding: 10px 20px;
+    background-color: #764ba2;
+    color: white;
+    border: none;
+    border-radius: 25px;
+    cursor: pointer;
+    margin-bottom: 20px;
+    transition: all 0.3s ease;
+}
+
+    .add-oblast-button:hover {
+        background-color: #5e368a;
+    }
+
+.oblasti-list {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 20px;
+}
+
+.oblast-card {
+    background-color: white;
+    padding: 20px 40px;
+    border-radius: 15px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+    .oblast-card:hover {
+        transform: scale(1.05);
+        box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+    }

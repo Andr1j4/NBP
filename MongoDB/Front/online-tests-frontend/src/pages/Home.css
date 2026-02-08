@@ -1,0 +1,61 @@
+body {
+    margin: 0;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+}
+
+.home-container {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    text-align: center;
+}
+
+.home-title {
+    font-size: 3rem;
+    margin-bottom: 10px;
+}
+
+.home-subtitle {
+    font-size: 1.2rem;
+    opacity: 0.9;
+    margin-bottom: 40px;
+}
+
+.start-button {
+    padding: 15px 40px;
+    font-size: 1.1rem;
+    border: none;
+    border-radius: 30px;
+    background-color: white;
+    color: #764ba2;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+    .start-button:hover {
+        transform: scale(1.05);
+        background-color: #f0f0f0;
+    }
+
+.login-button {
+    position: absolute;
+    font-size: 1.1rem;
+    top: 20px;
+    right: 20px;
+    padding: 8px 20px;
+    background-color: white;
+    color: #764ba2;
+    border-radius: 30px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+    .login-button:hover {
+        transform: scale(1.05);
+        background-color: #f0f0f0;
+    }
