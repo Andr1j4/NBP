@@ -4,10 +4,12 @@ Npredne Baze Podataka Projekti
 Pokretanje projekta
 
   Backend:
-    cd back
+  
+    cd Back 
     node server.js
    
   Frontend:
-    cd client
+  
+    cd Front/online-tests-fronted
     npm install
     npm start
