@@ -1,7 +1,7 @@
 # NBP
 Npredne Baze Podataka Projekti
 
-PROKRETANJE MONGODB
+PROKRETANJE MONGODB::::
 
 MongoDB/Back:
   node server.js
