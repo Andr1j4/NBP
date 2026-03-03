@@ -1,13 +1,13 @@
 # NBP
 Npredne Baze Podataka Projekti
 
-PROKRETANJE MONGODB::
+Pokretanje projekta
 
-MongoDB/Back:
-  node server.js
-  
-MongoDB/Front/online-tests-frontend:
-  npm start
-
-
-TREBALO BI AUTOMATSKI DA OTVORI BROWSWER
+  Backend:
+    cd back
+    node server.js
+   
+  Frontend:
+    cd client
+    npm install
+    npm start
