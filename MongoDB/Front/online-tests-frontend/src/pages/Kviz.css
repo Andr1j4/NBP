@@ -46,6 +46,11 @@
         transition: background-color 0.2s, border-color 0.2s;
     }
 
+        .answers-list li.answer.selected {
+            background-color: #cce0ff;
+            border-color: #3390ff;
+            color: #000; 
+        }
 
 .answer.selected {
     background-color: #dbe7ff;

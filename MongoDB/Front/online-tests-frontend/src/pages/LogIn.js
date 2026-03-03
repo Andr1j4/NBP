@@ -47,6 +47,12 @@ function Login() {
                     onChange={e => setPassword(e.target.value)}
                 />
                 <button className="login-button" onClick={handleLogin}>Login</button>
+                <button
+                    className="register-button"
+                    onClick={() => navigate("/register")}
+                >
+                    Nemate nalog? Registrujte se
+                </button>
             </div>
         </div>
     );

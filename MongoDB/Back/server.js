@@ -1,6 +1,7 @@
 ﻿const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const bcrypt = require("bcrypt");
 
 const app = express();
 app.use(cors());
@@ -106,14 +107,23 @@ const allowRoles = (...roles) => {
 };
 
 app.post("/api/login", async (req, res) => {
+
     const { username, password } = req.body;
 
     try {
-        const user = await User.findOne({ username, password });
-        if (!user) return res.status(401).json({ message: "Neispravno korisnicko ime ili lozinka" });
+        const user = await User.findOne({ username });
+        if (!user)
+            return res.status(401).json({ message: "Neispravno korisnicko ime ili lozinka" });
 
-        //token
-        const token = jwt.sign({ userId: user._id, role: user.role }, SECRET, { expiresIn: "7d" });
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch)
+            return res.status(401).json({ message: "Neispravno korisnicko ime ili lozinka" });
+
+        const token = jwt.sign(
+            { userId: user._id, role: user.role },
+            SECRET,
+            { expiresIn: "7d" }
+        );
 
         res.json({
             token,
@@ -123,9 +133,50 @@ app.post("/api/login", async (req, res) => {
                 role: user.role
             }
         });
+
     } catch (err) {
         res.status(500).json({ message: "Greška servera" });
     }
+
+});
+
+app.post("/api/register", async (req, res) => {
+
+    try {
+        const { username, email, password, role } = req.body;
+
+        if (!username || !email || !password) {
+            return res.status(400).json({ message: "Sva polja su obavezna" });
+        }
+
+        const existingUser = await User.findOne({
+            $or: [{ username }, { email }]
+        });
+
+        if (existingUser) {
+            return res.status(400).json({
+                message: "Korisničko ime ili email već postoji"
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+            role: role || "student" // sada prihvata poslatu rolu
+        });
+
+        await newUser.save();
+
+        res.status(201).json({ message: "Uspešna registracija" });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Greška servera" });
+    }
+
 });
 
 
@@ -281,49 +332,86 @@ app.post("/api/oblasti/:oblastId/testovi/:testId/pitanja", authMiddleware, allow
 
 //DODAVANJE REZULTATA
 app.post("/api/testovi/:testId/rezultat", async (req, res) => {
-    const { userId, oblastId, odgovoriKorisnika } = req.body;
-    const { testId } = req.params;
 
-    const oblast = await Oblast.findById(oblastId);
-    const test = oblast.testovi.id(testId);
+    try {
+        const { userId, oblastId, odgovoriKorisnika } = req.body;
+        const { testId } = req.params;
 
-    let brojTacnih = 0;
-    const rezultatPoPitanju = [];
+        const oblast = await Oblast.findById(oblastId);
+        if (!oblast) {
+            return res.status(404).json({ message: "Oblast nije pronađena" });
+        }
 
-    test.pitanja.forEach(pitanje => {
-        const korisnicki = odgovoriKorisnika.find(
-            o => o.pitanjeId === pitanje._id.toString()
-        );
+        const test = oblast.testovi.id(testId);
+        if (!test) {
+            return res.status(404).json({ message: "Test nije pronađen" });
+        }
 
-        const tacan = pitanje.odgovori.find(o => o.tacan);
+        let ukupnoPoena = 0;
+        let maxPoena = test.pitanja.length;
+        const rezultatPoPitanju = [];
 
-        const tacno = korisnicki && tacan && tacan._id.toString() === korisnicki.odgovorId;
+        test.pitanja.forEach(pitanje => {
+            const korisnicki = odgovoriKorisnika.find(
+                o => o.pitanjeId === pitanje._id.toString()
+            );
 
-        if (tacno) brojTacnih++;
+            const tacniOdgovori = pitanje.odgovori
+                .filter(o => o.tacan)
+                .map(o => o._id.toString());
 
-        rezultatPoPitanju.push({
-            pitanjeId: pitanje._id,
-            tacanOdgovorId: tacan._id,
-            korisnikovOdgovorId: korisnicki?.odgovorId || null,
-            tacno
+            const korisnickiOdgovori = korisnicki?.odgovorIds || [];
+
+            const pogodjeniTacni = korisnickiOdgovori.filter(id =>
+                tacniOdgovori.includes(id)
+            ).length;
+
+            const pogresni = korisnickiOdgovori.filter(id =>
+                !tacniOdgovori.includes(id)
+            ).length;
+
+            let poeniZaPitanje = 0;
+
+            if (pogresni === 0 && tacniOdgovori.length > 0) {
+                poeniZaPitanje = pogodjeniTacni / tacniOdgovori.length;
+            }
+
+            ukupnoPoena += poeniZaPitanje;
+
+            rezultatPoPitanju.push({
+                pitanjeId: pitanje._id,
+                tacniOdgovori,
+                korisnickiOdgovori,
+                poeniZaPitanje
+            });
         });
-    });
 
-    const rezultat = new Result({
-        userId,
-        testId,
-        oblastId,
-        brojTacnih,
-        ukupnoPitanja: test.pitanja.length
-    });
+        let sacuvanRezultat = null;
 
-    await rezultat.save();
+        if (userId) {
+            sacuvanRezultat = new Result({
+                userId,
+                testId,
+                oblastId,
+                brojTacnih: ukupnoPoena,
+                ukupnoPitanja: maxPoena
+            });
 
-    res.json({
-        brojTacnih,
-        ukupnoPitanja: test.pitanja.length,
-        rezultatPoPitanju
-    });
+            await sacuvanRezultat.save();
+        }
+
+        return res.json({
+            brojTacnih: ukupnoPoena,
+            ukupnoPitanja: maxPoena,
+            rezultatPoPitanju,
+            sacuvan: !!sacuvanRezultat
+        });
+
+    } catch (err) {
+        console.error("GRESKA PRI RACUNANJU REZULTATA:", err);
+        return res.status(500).json({ message: "Greška pri obradi rezultata" });
+    }
+
 });
 
 //VRACANJE KORISNIKA

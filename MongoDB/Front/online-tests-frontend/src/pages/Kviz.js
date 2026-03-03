@@ -62,44 +62,73 @@ function Kviz() {
     const handleAnswerClick = (pitanjeId, odgovorId) => {
         if (zavrseno) return;
 
-        setUserAnswers(prev => ({
-            ...prev,
-            [pitanjeId]: odgovorId
-        }));
+        setUserAnswers(prev => {
+            const current = prev[pitanjeId] || [];
+
+            console.log("Klik:", pitanjeId, odgovorId);
+
+            return {
+                ...prev,
+                [pitanjeId]: current.includes(odgovorId)
+                    ? current.filter(id => id !== odgovorId)
+                    : [...current, odgovorId]
+            };
+        });
+
     };
 
     const submitQuiz = async () => {
-        const odgovoriKorisnika = Object.keys(userAnswers).map(pid => ({
-            pitanjeId: pid,
-            odgovorId: userAnswers[pid]
-        }));
 
-        const res = await axios.post(
-            `http://localhost:5000/api/testovi/${testId}/rezultat`,
-            {
-                userId,
+        try {
+            const odgovoriKorisnika = Object.keys(userAnswers).map(pid => ({
+                pitanjeId: pid,
+                odgovorIds: userAnswers[pid]
+            }));
+
+            console.log("SALJEM:", userAnswers);
+
+            const payload = {
                 oblastId,
                 odgovoriKorisnika
-            }
-        );
+            };
 
-        setRezultat(res.data);
-        setZavrseno(true);
+            if (userId) payload.userId = userId;
+
+            const res = await axios.post(
+                `http://localhost:5000/api/testovi/${testId}/rezultat`,
+                payload
+            );
+
+            setRezultat(res.data);
+            setZavrseno(true);
+
+        } catch (err) {
+            console.error(err.response?.data || err);
+            alert("Greška pri završavanju testa");
+        }
+
     };
 
     const getAnswerClass = (pitanjeId, odgovorId) => {
         if (!zavrseno) {
-            return userAnswers[pitanjeId] === odgovorId
+            const selectedAnswers = userAnswers[pitanjeId] || [];
+
+            return selectedAnswers.includes(odgovorId)
                 ? "answer selected"
                 : "answer";
         }
 
-        const r = rezultat.rezultatPoPitanju.find(r => r.pitanjeId === pitanjeId);
+        const r = rezultat.rezultatPoPitanju.find(
+            r => r.pitanjeId === pitanjeId
+        );
 
-        if (r.tacanOdgovorId === odgovorId) return "answer correct";
-        if (r.korisnikovOdgovorId === odgovorId) return "answer wrong";
+        if (!r) return "answer";
+
+        if (r.tacniOdgovori.includes(odgovorId)) return "answer correct";
+        if (r.korisnickiOdgovori.includes(odgovorId)) return "answer wrong";
 
         return "answer";
+
     };
 
     const dodajPitanje = async () => {
@@ -183,7 +212,11 @@ function Kviz() {
 
                     {zavrseno && (
                         <h2>
-                            Rezultat: {rezultat.brojTacnih} / {rezultat.ukupnoPitanja}
+
+                            Rezultat: {rezultat.brojTacnih.toFixed(2)} / {rezultat.ukupnoPitanja}
+                            ({Math.round((rezultat.brojTacnih / rezultat.ukupnoPitanja) * 100)}%)
+
+                            {/*Rezultat: {rezultat.brojTacnih} / {rezultat.ukupnoPitanja}*/}
                         </h2>
                     )}
                 </div>
@@ -240,10 +273,13 @@ function Kviz() {
                                 />
                                 <label>
                                     <input
-                                        type="radio"
-                                        name="tacan"
+                                        type="checkbox"
                                         checked={o.tacan}
-                                        onChange={() => setOdgovori(odgovori.map((odg, idx) => ({ ...odg, tacan: idx === i })))}
+                                        onChange={() => {
+                                            const kopija = [...odgovori];
+                                            kopija[i].tacan = !kopija[i].tacan;
+                                            setOdgovori(kopija);
+                                        }}
                                     />
                                     Tacan
                                 </label>

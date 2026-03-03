@@ -3,12 +3,12 @@
   "WorkspaceRootPath": "C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Front\\online-tests-frontend\\src\\App.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Front\\online-tests-frontend\\src\\App.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
-    },
-    {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Back\\server.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Back\\server.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Front\\online-tests-frontend\\src\\App.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:Front\\online-tests-frontend\\src\\App.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}"
     },
     {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Front\\online-tests-frontend\\src\\pages\\Kviz.js||{14D17961-FE51-464D-9111-C4AF11D7D99A}",
@@ -58,7 +58,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 9,
+          "SelectedChildIndex": 8,
           "Children": [
             {
               "$type": "Document",
@@ -70,8 +70,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\LogIn.css",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAAAUAAAA8AAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003000|",
-              "WhenOpened": "2025-12-29T18:14:28.9Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-29T18:14:28.9Z"
             },
             {
               "$type": "Document",
@@ -83,8 +82,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\LogIn.js",
               "ViewState": "AgIAABMAAAAAAAAAAAAAADcAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2025-12-29T18:13:59.565Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-29T18:13:59.565Z"
             },
             {
               "$type": "Document",
@@ -96,8 +94,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Areas.css",
               "ViewState": "AgIAAEUAAAAAAAAAAAAAAFcAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003000|",
-              "WhenOpened": "2025-12-29T17:36:46.445Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-29T17:36:46.445Z"
             },
             {
               "$type": "Document",
@@ -109,8 +106,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Areas.js",
               "ViewState": "AgIAAHUAAAAAAAAAAAAAAJkAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2025-12-26T19:36:44.6Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-26T19:36:44.6Z"
             },
             {
               "$type": "Document",
@@ -122,8 +118,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Tests.js",
               "ViewState": "AgIAAJIAAAAAAAAAAAAAAKcAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2025-12-26T21:47:52.555Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-26T21:47:52.555Z"
             },
             {
               "$type": "Document",
@@ -135,8 +130,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Tests.css",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAAAUAAAATAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003000|",
-              "WhenOpened": "2025-12-26T21:47:57.851Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-26T21:47:57.851Z"
             },
             {
               "$type": "Document",
@@ -148,8 +142,7 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Kviz.css",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAAJsAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.003000|",
-              "WhenOpened": "2025-12-26T21:48:40.44Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-26T21:48:40.44Z"
             },
             {
               "$type": "Document",
@@ -161,31 +154,30 @@
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\pages\\Kviz.js",
               "ViewState": "AgIAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
-              "WhenOpened": "2025-12-26T21:48:33.955Z",
-              "EditorCaption": ""
+              "WhenOpened": "2025-12-26T21:48:33.955Z"
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 0,
               "Title": "server.js",
               "DocumentMoniker": "C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Back\\server.js",
               "RelativeDocumentMoniker": "Back\\server.js",
               "ToolTip": "C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Back\\server.js",
               "RelativeToolTip": "Back\\server.js",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAoAAAAeAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAPYBAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
               "WhenOpened": "2025-12-26T18:15:32.252Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 1,
               "Title": "App.js",
               "DocumentMoniker": "C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Front\\online-tests-frontend\\src\\App.js",
               "RelativeDocumentMoniker": "Front\\online-tests-frontend\\src\\App.js",
               "ToolTip": "C:\\Users\\DELL PRECIZION\\Desktop\\Fakultet\\IV Godina\\Napredne Baze Podataka\\MongoDB\\Front\\online-tests-frontend\\src\\App.js",
               "RelativeToolTip": "Front\\online-tests-frontend\\src\\App.js",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABsAAAAzAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001646|",
               "WhenOpened": "2025-12-26T18:33:19.805Z",
               "EditorCaption": ""

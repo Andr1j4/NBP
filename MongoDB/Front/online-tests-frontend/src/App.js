@@ -6,6 +6,7 @@ import Login from "./pages/LogIn";
 import Areas from "./pages/Areas";
 import Tests from "./pages/Tests";
 import Kviz from "./pages/Kviz";
+import Register from "./pages/Register";
 
 localStorage.clear();
 
@@ -17,6 +18,8 @@ function App() {
             <Routes>
                 <Route path="/" element={<Home />} />
                 <Route path="/login" element={<Login />} />
+                <Route path="/register" element={<Register />} />
+
 
                 {/* Oblasti (Areas.js) */}
                 <Route path="/areas" element={<Areas userId={localStorage.getItem("userId")} />} />
